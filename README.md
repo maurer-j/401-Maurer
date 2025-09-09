@@ -1,4 +1,4 @@
-# DA401 Capstone Project - [Your Name]
+# DA401 Capstone Project - Jordyn Maurer
 
 ## Project Title
 (Write a clear, descriptive title for your project.)
