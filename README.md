@@ -13,7 +13,8 @@ Where is your data coming from?
 Which methods or models will you use? 
 
 ## Expected Timeline
-What do you expect to produce every week?
+<img width="1036" height="341" alt="image" src="https://github.com/user-attachments/assets/19c59ada-046f-4811-bccc-49eb65b01902" />
+
 
 ## Google Drive 
 (https://drive.google.com/drive/folders/1aTM14L0AzK1xiSqmDgkvh7ZZ9AcbEZ7o?usp=drive_link)
