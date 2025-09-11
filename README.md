@@ -16,7 +16,7 @@ Which methods or models will you use?
 What do you expect to produce every week?
 
 ## Google Drive 
-[Google Drive link if you have any]
+(https://drive.google.com/drive/folders/1aTM14L0AzK1xiSqmDgkvh7ZZ9AcbEZ7o?usp=drive_link)
 
 ## Repository Structure
 - `code/`: All analysis scripts or notebooks
