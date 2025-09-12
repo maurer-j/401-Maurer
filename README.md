@@ -7,7 +7,7 @@
 What question are you trying to answer?
 
 ## Data Source
-Where is your data coming from? 
+Denison University Strength and Conditioning (force plate data) and Denison University Athletic Training Room (injury data)
 
 ## Methods
 Which methods or models will you use? 
