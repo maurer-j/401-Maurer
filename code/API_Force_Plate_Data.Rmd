@@ -1,0 +1,169 @@
+---
+title: "Force_Plate_API_Access"
+output: html_document
+date: "2025-09-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# install.packages("devtools")
+```{r}
+devtools::install_github("HawkinDynamics/hawkinR")
+```
+
+# Get Access - - - - -
+
+# This function only needs to be executed 1 time and provides access for 1 hour
+
+# The `region` parameter is default to "Americas", and does not need to be included if your site is in this region. Other regions ("Europe", "Asia/Pacific") would need to specify
+
+# Input your secret integration key where I have 'secretKey'
+
+```{r}
+library(hawkinR)
+library(tidyverse)
+library(dplyr)
+get_access('vPKBLq.le5HM5LYjRerJE5nDuSo8MPuEo5v7', region = "Americas")
+testIds <- get_testTypes()
+Roster <- get_athletes()
+```
+
+```{r}
+group_df <- data.frame(
+  groupID = c(
+    "ZUggAD2tJyLQdTjY5NC6",
+    "j7GJYC1D2R72qkhRLSMV",
+    "v8lRGzQzaRVZu5ScFxZ9",
+    "5drTQUE0JqiSKGqZfjiR",
+    "EErrhFxsWhCZXFO18T4s",
+    "uPgSmiAsqw9z4eh17UPy",
+    "SBARyfjhwleDYrYD5kad",
+    "oRiGgTKIXQs8nbr8tdia",
+    "DkSNuDeSUf3dVtbowSyj",
+    "RmMlgDN2eOWtHZm1Zw68",
+    "Vi50x7AlYJy5QXrtldlq",
+    "8HmVZQXeWQIfN4A2RKtU",
+    "B9ygsEAXT8ncCiT21ETn",
+    "1vId55SVdTL35jUpTSZv",
+    "joDghgbjPc9jSSADHh5B",
+    "fOZyq6AP3Lzbcwmpj10P",
+    "kHSiV4I9tBSSl6RKWwJo"
+  ),
+  team = c(
+    "Football",
+    "Men's Soccer",
+    "Men's Basketball",
+    "Baseball",
+    "Men's Tennis",
+    "Golf",
+    "Softball",
+    "Men's Lacrosse",
+    "Field Hockey",
+    "Women's Tennis",
+    "Women's Lacrosse",
+    "Women's Soccer",
+    "Volleyball",
+    "Women's Basketball",
+    "Women's Dive",
+    "Men's Dive",
+    "Women's Fencing"
+  ),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+library(lubridate)
+library(stringr)
+
+# --- Date window (local tz) ---
+start_local <- as_datetime("2024-08-01 00:00:00", tz = "America/New_York")
+end_local   <- as_datetime("2025-05-31 23:59:59", tz = "America/New_York")
+
+# --- CMJ id from your testIds tibble ---
+cmj_type_id <- testIds %>%
+  filter(str_to_lower(name) == "countermovement jump" | abbreviation == "CMJ") %>%
+  pull(canonicalId) %>% .[1]
+
+# --- Minimal wrapper that calls get_tests() with only the group id ---
+get_tests_all <- function(gid) {
+  fn  <- hawkinR::get_tests
+  fml <- names(formals(fn))
+  args <- list()
+  for (nm in c("group_id","groupId","group","groupID","gid")) {
+    if (nm %in% fml) { args[[nm]] <- gid; break }
+  }
+  # If no group arg is found, just call with no args (some builds return org-wide)
+  tryCatch(do.call(fn, args), error = function(e) tibble(.error = conditionMessage(e)))
+}
+
+# --- Helpers to find column names in returned data ---
+get_time_col <- function(df) {
+  candidates <- c("performedAt","performedDateTime","timestamp","createdAt","time","testTime")
+  intersect(candidates, names(df))[1]
+}
+get_testtype_col <- function(df) {
+  candidates <- c("testTypeId","test_type_id","testTypeCanonicalId",
+                  "test_type_canonical_id","canonicalTestTypeId")
+  intersect(candidates, names(df))[1]
+}
+
+# --- Pull EVERYTHING first for each team ---
+raw_all <- map_dfr(group_df$groupID, ~{
+  dat <- get_tests_all(.x)
+  if (!is.data.frame(dat) || nrow(dat) == 0) return(tibble())
+  dat %>% mutate(groupID = .x)
+}) %>%
+  left_join(group_df, by = "groupID")
+
+
+```
+
+# keeping only the CMJ test and filtering for specific date range (2024-2025)
+```{r}
+# 1) Define date range
+start_dt <- as_datetime("2024-08-01 00:00:00", tz = "America/New_York")
+end_dt   <- as_datetime("2025-05-31 23:59:59", tz = "America/New_York")
+
+# 2) Filter for ONLY "Countermovement Jump" and convert timestamp
+cmj_only <- raw_all %>%
+  filter(testType_name == "Countermovement Jump") %>%
+  mutate(timestamp_parsed = as_datetime(as.numeric(timestamp), tz = "America/New_York")) %>%
+  filter(timestamp_parsed >= start_dt & timestamp_parsed <= end_dt)
+
+# 3) Sanity check
+list(
+  n_rows_cmj = nrow(cmj_only),
+  unique_test_names = unique(cmj_only$testType_name),
+  date_range = range(cmj_only$timestamp_parsed, na.rm = TRUE)
+)
+
+```
+
+# checking to see if it worked
+```{r}
+unique(cmj_only$team)
+```
+
+# creating .csv file
+```{r}
+cmj_clean <- cmj_only %>%
+  select(-athlete_teams, -athlete_groups, 
+         -testType_tags_id, -testType_tags_name, -testType_tags_desc)
+
+
+write.csv(cmj_clean, "C:/Users/jordy/Documents/CMJ_Aug2024_May2025.csv", row.names = FALSE)
+```
+
+```{r}
+cmj_check <- read.csv("CMJ_Aug2024_May2025.csv")
+
+# Confirm dimensions match what you expect
+dim(cmj_check)
+```
+
+
