@@ -1,10 +1,10 @@
 # DA401 Capstone Project - Jordyn Maurer
 
-## Project Title
+## From Jumps to Signals: Selecting Countermovement Jump Features for Injury-Risk Classification
 (Write a clear, descriptive title for your project.)
 
 ## Research Question
-What question are you trying to answer?
+Which force plate metrics can be leveraged to proactively identify athletes at higher risk of injury?
 
 ## Data Source
 Denison University Strength and Conditioning (force plate data) and Denison University Athletic Training Room (injury data)
