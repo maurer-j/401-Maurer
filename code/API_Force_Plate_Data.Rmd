@@ -25,6 +25,9 @@ devtools::install_github("HawkinDynamics/hawkinR")
 library(hawkinR)
 library(tidyverse)
 library(dplyr)
+library(purrr)
+library(lubridate)
+library(stringr)
 get_access('vPKBLq.le5HM5LYjRerJE5nDuSo8MPuEo5v7', region = "Americas")
 testIds <- get_testTypes()
 Roster <- get_athletes()
@@ -75,11 +78,6 @@ group_df <- data.frame(
 ```
 
 ```{r}
-library(dplyr)
-library(purrr)
-library(lubridate)
-library(stringr)
-
 # --- Date window (local tz) ---
 start_local <- as_datetime("2024-08-01 00:00:00", tz = "America/New_York")
 end_local   <- as_datetime("2025-05-31 23:59:59", tz = "America/New_York")
@@ -121,49 +119,68 @@ raw_all <- map_dfr(group_df$groupID, ~{
   left_join(group_df, by = "groupID")
 
 
-```
+# --- Filter to CMJ, convert timestamp, and keep only Aug 2024 - May 2025 ----
 
-# keeping only the CMJ test and filtering for specific date range (2024-2025)
-```{r}
-# 1) Define date range
 start_dt <- as_datetime("2024-08-01 00:00:00", tz = "America/New_York")
 end_dt   <- as_datetime("2025-05-31 23:59:59", tz = "America/New_York")
 
-# 2) Filter for ONLY "Countermovement Jump" and convert timestamp
 cmj_only <- raw_all %>%
   filter(testType_name == "Countermovement Jump") %>%
-  mutate(timestamp_parsed = as_datetime(as.numeric(timestamp), tz = "America/New_York")) %>%
-  filter(timestamp_parsed >= start_dt & timestamp_parsed <= end_dt)
+  mutate(
+    performed_at_utc   = as_datetime(as.numeric(timestamp), tz = "UTC"),
+    performed_at_local = with_tz(performed_at_utc, "America/New_York"),
+    performed_date     = as_date(performed_at_local)
+  ) %>%
+  filter(performed_at_local >= start_dt & performed_at_local <= end_dt)
 
-# 3) Sanity check
-list(
-  n_rows_cmj = nrow(cmj_only),
-  unique_test_names = unique(cmj_only$testType_name),
-  date_range = range(cmj_only$timestamp_parsed, na.rm = TRUE)
+# ---- Clean and rename columns ----
+cmj_clean <- cmj_only %>%
+  rename(Organizations = team) %>%  # matches your ProblemDate table
+  select(
+    Organizations, athlete_id, athlete_name, segment, testType_name,
+    performed_at_local, performed_date, everything(), -timestamp,
+    -athlete_teams, -athlete_groups,
+    -testType_tags_id, -testType_tags_name, -testType_tags_desc
+  ) %>%
+  mutate(
+    performed_at_local = format(performed_at_local, "%Y-%m-%d %H:%M:%S")
+  )
+
+# Quick sanity check BEFORE writing
+names(cmj_clean)
+summary(range(cmj_clean$performed_date))
+
+# ---- Write as CSV ----
+library(readr)
+write_csv(cmj_clean, "C:/Users/jordy/Documents/CMJ_Aug2024_May2025.csv")
+
+# ---- Read it back cleanly ----
+cmj_check <- read_csv(
+  "C:/Users/jordy/Documents/CMJ_Aug2024_May2025.csv",
+  col_types = cols(
+    performed_at_local = col_datetime(format = "%Y-%m-%d %H:%M:%S"),
+    performed_date = col_date()
+  )
 )
 
+# Verify that columns are present and correct
+names(cmj_check)
+head(cmj_check)
 ```
 
-# checking to see if it worked
 ```{r}
+# checking dates and that only the cmj data has been pulled
+
+# counting the test types
+cmj_only %>% count(testType_name)
+
+# checking the data range
+range(cmj_only$performed_at_local)
+
+# teams present 
 unique(cmj_only$team)
 ```
 
-# creating .csv file
-```{r}
-cmj_clean <- cmj_only %>%
-  select(-athlete_teams, -athlete_groups, 
-         -testType_tags_id, -testType_tags_name, -testType_tags_desc)
 
-
-write.csv(cmj_clean, "C:/Users/jordy/Documents/CMJ_Aug2024_May2025.csv", row.names = FALSE)
-```
-
-```{r}
-cmj_check <- read.csv("CMJ_Aug2024_May2025.csv")
-
-# Confirm dimensions match what you expect
-dim(cmj_check)
-```
 
 
