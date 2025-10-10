@@ -1,0 +1,98 @@
+---
+title: "combining_cmj_injury"
+output: html_document
+date: "2025-10-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r setup, include=FALSE}
+# loading necessary libraries
+library(dplyr)
+library(readr)
+library(lubridate)
+```
+
+
+# 1. Loading CMJ Data and Analyzing Structure Before Merging
+```{r setup, include=FALSE}
+# reading in the cmj data
+cmj <- read_csv("CMJ_All_De_Identified.csv")
+
+# previewing to check
+head(cmj)
+```
+
+```{r}
+# checking variable names and dimension
+names(cmj)
+dim(cmj)
+
+# checking which date variable is the one i need to be looking at
+class(cmj$performed_at_local)
+class(cmj$performed_at_utc)
+
+# looking at performed_at_utc
+cmj_date_check <- cmj %>%
+  select(performed_at_utc)
+head(cmj_date_check)
+```
+
+The date variable we need is "performed_at_utc" but we are going to rename it for clarity.
+```{r}
+# renaming performed_at_utc to JumpDate
+cmj <- cmj %>%
+  rename(JumpDate = performed_at_utc)
+
+# checking to see if it worked properly
+head(cmj$JumpDate)
+```
+
+We know there are several variables with many NA values from previewing the data. We will now filter those out before merging. 
+```{r}
+# checking for NA values
+colSums(is.na(cmj))
+```
+
+Many of our columns have all or mostly NA values. We will remove this from the dataset now before merging. 
+```{r}
+cmj <- cmj[, colSums(is.na(cmj)) <= 14000] # removing all columns where there is more than 14000 NA values as this is about half the observations
+
+# checking new dimensions
+dim(cmj)
+```
+
+After filtering out columns with over 14,000 NA values, we went from 311 variables to 93: a much easier dataset to merge. We'll now check for any unnecessary variables which will include any metrics not worthy of including in our analysis. 
+```{r}
+# seeing the remaining variable names
+names(cmj)
+
+# checking the purpose/structure of some unknown variables to see what else can be dropped before merging
+head(cmj)
+```
+
+After previewing the data, here are the list of unnecessary variables and the justification for why we are not including them in the final dataset: 
+athlete_id: we created our own athlete ID and does not provide additional information necessary to analyze injuries
+segment: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+testType_name: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+id: we created our own athlete ID and does not provide additional information necessary to analyze injuries
+testType_uuid: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+testType_canonicalId: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+athlete_active: we don't care if an athlete is currently active as it does not influence our study and only acts as another form of identification
+active: we don't care if an athlete is currently active as it does not influence our study and only acts as another form of identification
+last_test_time: we don't care when an athlete last jumped
+last_sync_time: we don't care when the forceplate was last synced
+groupID: this does not provide any additional information as we already have the athlete's team
+
+```{r}
+# removing the above metrics 
+cmj <- cmj %>%
+  select(-athlete_id, -segment, -testType_name, -id, -testType_uuid, -testType_canonicalId, -athlete_active, -active, -last_test_time, -last_sync_time, -groupID)
+
+# checking new structure
+names(cmj)
+dim(cmj)
+```
+
