@@ -5,10 +5,10 @@ date: "2025-10-10"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r setup, include=FALSE}
+```{r}
 # loading necessary libraries
 library(dplyr)
 library(readr)
@@ -150,7 +150,7 @@ str(merged_data$ProblemDate)
 str(merged_data$JumpDate)
 
 # merging and making sure each are date variables
-merged_data <- merged_data %>%
+merged_data_2 <- merged_data %>%
   mutate(
     ProblemDate = as_date(ProblemDate),
 
@@ -159,16 +159,17 @@ merged_data <- merged_data %>%
     Injured = if_else(!is.na(days_before) & days_before >= 0 & days_before <= 14, 1L, 0L)
   )
 
-merged_data %>%
+merged_data_2 %>%
   select(ID, JumpDate, ProblemDate, days_before, Injured) %>%
   arrange(ID, JumpDate) %>%
   head(20)
 
 # checking ratios
-table(merged_data$Injured)
+table(merged_data_2$Injured)
+sum(is.na(merged_data_2$days_before))
 ```
 
-Using 2 weeks, we have 761 injured cases vs. 25,193 non-injured cases, a large imbalance. We will now extend that window to 4 weeks to see if we capture more injured cases and slower-developing fatigue patterns. 
+Using 2 weeks, we have 761 injured cases vs. 25,193 non-injured cases, a large imbalance. We also see that days_before produce 15803 NA values, meaning these were the total jumps from non-injured athletes. We will now extend that window to 4 weeks to see if we capture more injured cases and slower-developing fatigue patterns. 
 
 ```{r}
 # creating a dataset with 4 weeks leading up to injuries
@@ -183,6 +184,7 @@ merged_data_4 <- merged_data %>%
 
 # looking at ratios
 table(merged_data_4$Injured)
+sum(is.na(merged_data_4$days_before))
 ```
 
 With 4 weeks as our window, we now have 1385 injured cases vs. 24569 non-injured cases. This gives us a better ratio for modeling. We will now create a .csv of our merged data for easier future use. 
