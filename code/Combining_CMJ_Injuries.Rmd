@@ -17,7 +17,7 @@ library(lubridate)
 
 
 # 1. Loading CMJ Data and Analyzing Structure Before Merging
-```{r setup, include=FALSE}
+```{r}
 # reading in the cmj data
 cmj <- read_csv("CMJ_All_De_Identified.csv")
 
@@ -69,9 +69,127 @@ After filtering out columns with over 14,000 NA values, we went from 311 variabl
 # seeing the remaining variable names
 names(cmj)
 
-# checking the purpose/structure of some unknown variables
-head(cmj$athlete_id)
-head(cmj$testType_name)
-head(cmj$id)
+# checking the purpose/structure of some unknown variables to see what else can be dropped before merging
+head(cmj)
+```
+
+After previewing the data, here are the list of unnecessary variables and the justification for why we are not including them in the final dataset: 
+athlete_id: we created our own athlete ID and does not provide additional information necessary to analyze injuries
+segment: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+testType_name: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+id: we created our own athlete ID and does not provide additional information necessary to analyze injuries
+testType_uuid: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+testType_canonicalId: we don't need to know the specific jump as we've already filtered out for only CMJ when calling the API
+athlete_active: we don't care if an athlete is currently active as it does not influence our study and only acts as another form of identification
+active: we don't care if an athlete is currently active as it does not influence our study and only acts as another form of identification
+last_test_time: we don't care when an athlete last jumped
+last_sync_time: we don't care when the forceplate was last synced
+groupID: this does not provide any additional information as we already have the athlete's team
+
+```{r}
+# removing the above metrics 
+cmj <- cmj %>%
+  select(-athlete_id, -segment, -testType_name, -id, -testType_uuid, -testType_canonicalId, -athlete_active, -active, -last_test_time, -last_sync_time, -groupID)
+
+# checking new structure
+names(cmj)
+dim(cmj)
+```
+
+We now have 82 variables rather than 311 as what we started with. we still have several repetitive date variables but we wont't remove any just in case they are necessary for merging. We can now upload the injury data and prepare to merge. 
+
+
+# 2. Loading Injury Data and Analyzing Structure Before Merging
+
+```{r}
+# reading in the injury data
+inj <- read_csv("injury_data.csv")
+
+# previewing to check
+head(inj)
+```
+
+```{r}
+# previewing the structure and dimensions before merging
+dim(inj)
+colSums(is.na(inj)) # finding out columns with large NA values
+```
+
+From the above, we see BodyPartName has 162/275 NA values. After inspection, we see BodyPartName is the medical term for the injury site and will not be used for this research. We will remove it from our data before merging. 
+
+```{r}
+# removing BodyPartName from the data
+inj <- inj %>%
+  select(-BodyPartName)
+
+# checking to see that it worked
+colSums(is.na(inj))
+```
+
+Now, our datasets are ready to merge on the ID variable. 
+
+
+# 3. Merging the CMJ and Injury Data
+
+```{r}
+# using a left join to keep all records
+merged_data <- cmj %>%
+  left_join(inj, by = c("ID" = "ID"))
+
+# checking to make sure everything merged correctly
+head(merged_data)
+dim(merged_data)
+dplyr::glimpse(merged_data)
+```
+
+# 4. Creating Our "Injured" Variable to Indicate an Athlete's Injury Status.
+
+```{r}
+# checking whether they are listed as dates
+str(merged_data$ProblemDate)
+str(merged_data$JumpDate)
+
+# merging and making sure each are date variables
+merged_data <- merged_data %>%
+  mutate(
+    ProblemDate = as_date(ProblemDate),
+
+    days_before = as.integer(ProblemDate - as_date(JumpDate)),
+
+    Injured = if_else(!is.na(days_before) & days_before >= 0 & days_before <= 14, 1L, 0L)
+  )
+
+merged_data %>%
+  select(ID, JumpDate, ProblemDate, days_before, Injured) %>%
+  arrange(ID, JumpDate) %>%
+  head(20)
+
+# checking ratios
+table(merged_data$Injured)
+```
+
+Using 2 weeks, we have 761 injured cases vs. 25,193 non-injured cases, a large imbalance. We will now extend that window to 4 weeks to see if we capture more injured cases and slower-developing fatigue patterns. 
+
+```{r}
+# creating a dataset with 4 weeks leading up to injuries
+merged_data_4 <- merged_data %>%
+  mutate(
+    ProblemDate = as_date(ProblemDate),
+
+    days_before = as.integer(ProblemDate - as_date(JumpDate)),
+
+    Injured = if_else(!is.na(days_before) & days_before >= 0 & days_before <= 28, 1L, 0L)
+  )
+
+# looking at ratios
+table(merged_data_4$Injured)
+```
+
+With 4 weeks as our window, we now have 1385 injured cases vs. 24569 non-injured cases. This gives us a better ratio for modeling. We will now create a .csv of our merged data for easier future use. 
+
+# 5. Creating a .csv of our combined data
+
+```{r}
+write.csv(merged_data_4, "final_data.csv", row.names = FALSE)
 ```
 
