@@ -233,11 +233,50 @@ best_alpha <- cv_results$alpha[which.max(cv_results$mean_AUC)]
 best_alpha
 ```
 
-Since we have found the optimal $/alpha$ value, we will now find the best $/lamda$ (penalty) using 10-fold cross-validation. 
+Since we have found the optimal $/alpha$ value, we will now find the best $/lambda$ (penalty) using 10-fold cross-validation. 
 
 ## 3.2 Fitting Elastic Net with the Optimal Alpha
 
 ```{r}
+# finding the best lambda
+cv_elnet <- cv.glmnet(
+  x_train, y_train,
+  family = "binomial",
+  alpha = best_alpha,
+  type.measure = "auc",
+  nfolds = 10
+)
 
+plot(cv_elnet)
+title(main = paste("Elastic Net Cross-Validation (α =", best_alpha, ")"), line = 2.5)
 ```
+
+The figure above shows the results of 10-fold cross-validation used to determinal the optimal penalty parameter for the model at alpha = 0.1. Each red point represents the mean AUC for a given lambda value, while the grey bars indicate the standard errors. The left-dashed line represents the value that produces the highest average AUC. The right-dashed line is the largest lambda within one standard error of the minimum, which provides a similar performance with fewer predictors. We will go forward with the minimum lambda value. 
+
+We will now extract this lamdba value and get coefficients for the best alpha/lambda combination. 
+
+```{r}
+# getting best lambda
+best_lambda <- cv_elnet$lambda.min
+best_lambda
+
+# getting coefficients for the best alpha/lambda combo
+coef_elnet <- coef(cv_elnet, s = "lambda.min")
+coef_elnet
+```
+
+Because our alpha value leaned more towards Ridge, there was limited feature selection that took place after using the minimum lambda value. It shrinks the coefficients but does not zero them out. However, we want a smaller set of predictors to feed into a predictive model. Since $/alpha = 0.1$ was too similar to Ridge regression in handling multicollinearity rather than Lasso's ability to perform feature selection, we will now rerun our model more towards Lasso behavior. 
+
+# 4. Re-Doing Elastic Net to Behave More Like Lasso
+
+We will check higher $/alpha $ values to check which ones keep the AUC reasonable while still being able to trim predictors. 
+
+```{r}
+# re-examining previous cv results
+cv_results
+```
+
+
+
+
 
