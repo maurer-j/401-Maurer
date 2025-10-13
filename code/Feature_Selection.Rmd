@@ -1,0 +1,243 @@
+---
+title: "Feature_Selection"
+output: html_document
+date: "2025-10-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(42) # ensures reproducibility across all chunks
+library(readr)
+library(dplyr)
+library(corrplot)
+library(reshape2)
+library(ggplot2)
+library(ggcorrplot)
+library(glmnet)
+library(caret)
+library(pROC)
+```
+
+
+
+# 1. Loading and Inspecting Data
+```{r}
+# setting directory (probably needs to be changed later)
+getwd()
+setwd("C:\\Users\\jordy\\OneDrive\\Documents\\Coach_Scott\\Injuries")
+data <- read.csv("final_data.csv")
+```
+
+```{r}
+# checking data structure
+str(data)
+
+summary(data$Injured)
+
+# making sure INjured is numeric
+data$Injured <- as.numeric(data$Injured)
+```
+
+Now, we need to remove identifiers and non-numeric colummns. These identifiers include IDs, organizations, dates, and injury types.We will remove all character variables as well as "days_before" which was a helper variable to identify injured vs. non-injured jumps.  
+
+```{r}
+# removing identifiable information that will not be involved in the study and keeping only numeric data.  
+data_numeric <- data %>%
+  select(where(~ !is.character(.))) %>%
+  select(-days_before)
+
+str(data_numeric)
+```
+
+# 2. Exploring Correlations Among CMJ Metrics
+
+```{r}
+# initial plot with all metrics
+corr_matrix <- cor(data_numeric %>% select(-Injured), use = "pairwise.complete.obs")
+corrplot(corr_matrix, method = "color", tl.cex = 0.5)
+```
+
+From the above heatmap, we see there are an overwhelming number of metrics to compare all at once. Instead of plotting them all at once, we will instead find only the metrics with a relation greater than 0.8. 
+
+```{r}
+# filtering values above 0.8
+corr_long <- melt(corr_matrix) %>%
+  filter(Var1 != Var2, abs(value) > 0.8) %>%  
+  arrange(desc(abs(value)))
+
+corr_long # viewing
+
+# seeing how many unique variables are in this output
+unique_vars <- unique(c(corr_long$Var1, corr_long$Var2))
+length(unique_vars)
+```
+
+Above, we've created a table of variable pairs that are highly correlated. We see that there are 70 unique variables correlated with each other. This is what we expected from the CMJ in which each movement relates to the next, showing lots of correlated metrics. We will now create a histogram to demonstrate the spread of correlation values. 
+
+```{r}
+# creating histogram of correlations
+corr_values <- melt(corr_matrix)$value
+
+corr_coeff <- ggplot(data.frame(corr_values), aes(x = corr_values)) +
+  geom_histogram(bins = 50, fill = "#D02130", color = "white") +
+  labs(
+    title = "Distribution of Pairwise Correlations Among CMJ Metrics",
+    x = "Correlation Coefficient (r)",
+    y = "Count"
+  ) +
+  theme_minimal()
+corr_coeff
+
+ggsave("correlation_coefficients_his.png", plot = corr_coeff, width = 6, height = 4, units = "in", dpi = 300)
+```
+
+The above visual demonstrates that many CMJ metrics are strongly interrelated, while others remain only weakly associated. The clustering of high positive correlations reflects the biomechanicial origins of the derivation of the CMJ metrics corresponding with particular phases. This widespread multicollinearity highlights the need for penalized regression methods that can manage correlated predictors and isolate those that provide unique information about injury risk. 
+
+# 3. Elastic Net Classification for Feature Selection
+
+We will now use Elastic Net that blends lasso ($\alpha = 1$) and ridge ($\alpha = 0$) methods, accounting for multicollinearity and variable selection. 
+
+```{r}
+# performing an 80/20 split by athlete ID for train and test 
+ids <- unique(data$ID)
+train_ids <- sample(ids, size = floor(0.80 * length(ids)))
+is_train <- data$ID %in% train_ids
+
+train_df <- data_numeric[is_train, ]
+test_df <- data_numeric[!is_train, ]
+```
+
+Before running elastic net, we are going to check for missing values that may affect the process. 
+
+```{r}
+# counting NA values per column in training set
+na_counts <- colSums(is.na(train_df))
+
+# displaying only columns that actually have missing values
+na_counts[na_counts > 0]
+
+# checking NA percentages
+na_percent <- (na_counts / nrow(train_df)) * 100
+na_percent[na_percent > 0]  # only show columns with missing data
+
+```
+
+From the above output, we see there are 12 columns with 0.16% missing values. To account for these, we will insert the median of the column wherever the missing value occurs. 
+
+```{r}
+# median imputation
+
+# identifying numeric columns (excluding Injured)
+num_cols <- setdiff(names(train_df), "Injured")
+
+# computing medians from the training data
+meds <- sapply(train_df[, num_cols, drop = FALSE],
+               function(x) median(x, na.rm = TRUE))
+
+# replacing NA values in the training and test sets with those medians
+for (nm in num_cols) {
+  # Impute in training data
+  train_df[[nm]][is.na(train_df[[nm]])] <- meds[[nm]]
+  
+  # Impute in test data (using training medians!)
+  if (nm %in% names(test_df)) {
+    test_df[[nm]][is.na(test_df[[nm]])] <- meds[[nm]]
+  }
+}
+
+# checking to see that it worked
+sum(is.na(train_df))
+sum(is.na(test_df))
+```
+
+We now have removed any NA values from the training and test sets that may influence our Elastic Net Classification. We will now create the model matrices.
+
+```{r}
+# creating predictor matrix (x) and outcome vector (y)
+x_train <- model.matrix(Injured ~ ., data = train_df)[, -1]
+y_train <- train_df$Injured
+
+x_test  <- model.matrix(Injured ~ ., data = test_df)[, -1]
+y_test  <- test_df$Injured
+```
+
+Next, we'll search for the optimal value of $\alpha$ with 10-fold cross-validation, using AUC as our judge of model performance.
+
+## 3.1 Finding the optimal alpha ($\alpha$) for Elastic Net
+
+```{r}
+# defining a range of alpha values from ridge (0) to lasso (1)
+alphas <- seq(0, 1, by = 0.1)
+
+cv_results <- data.frame(alpha = alphas, mean_AUC = NA)
+
+for (i in seq_along(alphas)) {
+  cv <- cv.glmnet(
+    x_train, y_train,
+    family = "binomial",
+    alpha = alphas[i],
+    type.measure = "auc", 
+    nfolds = 10,
+    parallel = TRUE
+  )
+  cv_results$mean_AUC[i] <- max(cv$cvm)
+}
+
+cv_results
+```
+
+We will plot the results for readability. 
+
+```{r}
+best_idx <- which.max(cv_results$mean_AUC)
+best_alpha <- cv_results$alpha[best_idx]
+best_auc <- cv_results$mean_AUC[best_idx]
+
+alpha_plot <- ggplot(cv_results, aes(x = alpha, y = mean_AUC)) +
+  geom_line(color = "#1f77b4", linewidth = 1) +
+  geom_point(size = 3, color = "#1f77b4") +
+  geom_vline(xintercept = best_alpha, linetype = "dashed", color = "red", linewidth = 0.8) +
+  annotate(
+    "text",
+    x = best_alpha + 0.1,   # move text to the right
+    y = best_auc + 0.002,   # move text slightly above line
+    label = paste0("Best α = ", round(best_alpha, 2), "\nAUC = ", round(best_auc, 3)),
+    color = "red",
+    size = 3,
+    hjust = 0
+  ) +
+  labs(
+    title = "Mean AUC Across Alpha Values in Elastic Net Cross-Validation",
+    subtitle = "Evaluating Elastic Net balance between Ridge (α = 0) and Lasso (α = 1)",
+    x = expression(alpha ~ "(Penalty Mix: Ridge → Lasso)"),
+    y = "Mean AUC (10-Fold CV)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    axis.title = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+alpha_plot
+
+ggsave("optimal_alpha_values.png", plot = alpha_plot, width = 6, height = 4, units = "in", dpi = 300)
+```
+
+From the above output, we are shown how the mean AUC varies across diferent values of the mixing parameter, $/alpha $. Model performance peaked at $/alpha = 0.1$ (AUC = 0.646), indicating a structure more similar to Ridge regression. This makes sense considering many of the variables are highly correlated. 
+
+```{r}
+# creating a variable for the optimal alpha value
+best_alpha <- cv_results$alpha[which.max(cv_results$mean_AUC)]
+best_alpha
+```
+
+Since we have found the optimal $/alpha$ value, we will now find the best $/lamda$ (penalty) using 10-fold cross-validation. 
+
+## 3.2 Fitting Elastic Net with the Optimal Alpha
+
+```{r}
+
+```
+
