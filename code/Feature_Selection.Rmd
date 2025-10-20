@@ -16,6 +16,7 @@ library(ggcorrplot)
 library(glmnet)
 library(caret)
 library(pROC)
+library(broom)
 ```
 
 
@@ -145,12 +146,12 @@ for (nm in num_cols) {
   }
 }
 
-# checking to see that it worked
+# checking to see that it worked (should return zero for both)
 sum(is.na(train_df))
 sum(is.na(test_df))
 ```
 
-We now have removed any NA values from the training and test sets that may influence our Elastic Net Classification. We will now create the model matrices.
+We now have removed any NA values from the training and test sets that may influence our Elastic Net Classification. We will now create the model matrices and scale our predictors.
 
 ```{r}
 # creating predictor matrix (x) and outcome vector (y)
@@ -247,6 +248,7 @@ cv_elnet <- cv.glmnet(
   nfolds = 10
 )
 
+png("elasticnet_plot.png", width = 800, height = 600, res = 150)
 plot(cv_elnet)
 title(main = paste("Elastic Net Cross-Validation (α =", best_alpha, ")"), line = 2.5)
 ```
@@ -267,16 +269,156 @@ coef_elnet
 
 Because our alpha value leaned more towards Ridge, there was limited feature selection that took place after using the minimum lambda value. It shrinks the coefficients but does not zero them out. However, we want a smaller set of predictors to feed into a predictive model. Since $/alpha = 0.1$ was too similar to Ridge regression in handling multicollinearity rather than Lasso's ability to perform feature selection, we will now rerun our model more towards Lasso behavior. 
 
-# 4. Re-Doing Elastic Net to Behave More Like Lasso
+# 4. Lasso Classification 
 
-We will check higher $/alpha $ values to check which ones keep the AUC reasonable while still being able to trim predictors. 
+We chose to perform Elastic Net Classification in order to get a smaller, non-multicollinear subset of injury predictors. With Elastic Net, our optimal alpha leaned mostly towards Ridge, meaning there was limited variable selection. In order to perform variable selection, we will, instead, perform a combination of Lasso Classification and Bootstrapping, denoting which variables appear in most samples. 
+
+We will first start with Lasso Classification without Bootstrapping. 
 
 ```{r}
-# re-examining previous cv results
-cv_results
+# using our previous training and test sets
+cv_lasso <- cv.glmnet(
+  x = x_train,
+  y = y_train, 
+  family = "binomial", 
+  alpha = 1, # lasso penalty
+  type.measure = "auc", 
+  nfolds = 10
+)
+
+# plotting lambda results
+png("lasso_cv_plot.png", width = 800, height = 600, res = 150)
+plot(cv_lasso)
+title(main = "Lasso Cross-Validation (α = 1)", line = 2.5)
+dev.off()
+```
+
+The left-dashed line in the figure above represents the log $/lambda /$ value that produces the highest mean AUC. The right dashed line represents the largest log $/ lamda /$ within one standard error of the minimum, which yields a simpler model with similar performance. We will extract the key lambda values below. 
+
+```{r}
+# extracting lambda values
+lambda_min <- cv_lasso$lambda.min
+lambda_1se <- cv_lasso$lambda.1se
+lambda_min; lambda_1se
+```
+
+We will explore both the minimum lambda as well as the largest lambda for interpretation purposes. If we are looking for the best predictive AUC to maximize accuracy, we will use lambda min. If our goal is feature selection and interpretability, sacrifing only a minor drop in AUC, we will select lambda 1se. So, we will extract coefficients and nonzero variables for both lambdas.
+
+```{r}
+# extracting lambda 1se coefficients and non-zero variables
+coef_1se <- coef(cv_lasso, s = "lambda.1se")
+nonzero_1se <- rownames(coef_1se)[coef_1se[,1] != 0]
+
+nonzero_1se
+
+# extracting lambda min coefficients and non-zero variables
+coef_min <- coef(cv_lasso, s = "lambda.min")
+nonzero_min <- rownames(coef_min)[coef_min[,1] != 0]
+
+nonzero_min
+```
+
+We see the 1se model resulted in 37 variables, including the intercept while the minimum lambda resulted in 45 variables, including the intercept. We now need to compare model performance between lambda min and lambda 1se to decide whether the sparser model sacrifices any meaninful accuracy compared to the denser model. 
+
+```{r}
+# predicting probabilities on the test set
+p_min  <- as.numeric(predict(cv_lasso, newx = x_test, s = "lambda.min", type = "response"))
+p_1se  <- as.numeric(predict(cv_lasso, newx = x_test, s = "lambda.1se", type = "response"))
+
+# computing ROC and AUC
+roc_min <- roc(y_test, p_min, quiet = TRUE)
+roc_1se <- roc(y_test, p_1se, quiet = TRUE)
+
+auc_min  <- as.numeric(auc(roc_min))
+auc_1se  <- as.numeric(auc(roc_1se))
+
+auc_min; auc_1se
+
+# plotting together
+plot(roc_min, col = "#D02130", lwd = 2,
+     main = paste0("Test ROC Curves — λ_min vs λ_1se\nAUC(min) = ",
+                   round(auc_min, 3), " | AUC(1se) = ", round(auc_1se, 3)))
+lines(roc_1se, col = "#1f77b4", lwd = 2)
+legend("bottomright", legend = c("λ_min", "λ_1se"),
+       col = c("#D02130", "#1f77b4"), lwd = 2, bty = "n")
+```
+
+The ROC curves above compare the predictive performance of the lambda min and the lambda 1se Lasso models on the test data. Both achieved nearly identical test AUC values (0.521). An AUC of 0.5 represents random guessing, meaning that the model is no better than chance at distinguishing injured from non-injured jumps. With this, the Lasso model provides very limited discriminative ability on its own, suggesting that the linear relationships among CMJ metrics are not strong predictors of injury risk when considered independently. 
+
+However, because performance was essentially equivalent, the lambda 1se model will most likely be selected for further analysis due to its smaller predictor list. While predictive accuracy was low with just Lasso, this was used to reduce the dimensionality that can be used in non-linear modeling like XGBoost or logistic regression. 
+
+
+# 5. Fitting Logisitic Regression on our 37 Lasso Selected Variables
+
+We will fit an initial logistic regression using the 37 variable model.
+
+```{r}
+# building feature list from cv_lass output with lambda 1se
+coef_1se <- coef(cv_lasso, s = "lambda.1se")   
+sel_1se <- data.frame(
+  Feature     = rownames(coef_1se),
+  Coefficient = as.numeric(coef_1se)
+)
+
+# keep non-zero and drop intercept
+sel_1se <- sel_1se[sel_1se$Coefficient != 0 & sel_1se$Feature != "(Intercept)", ]
+selected_vars <- sel_1se$Feature
+
+# making sure all selected features exist in training data
+missing_in_train <- setdiff(selected_vars, names(train_df))
+if (length(missing_in_train) > 0) {
+  message("The following selected features are not columns in train_df and will be dropped: ",
+          paste(missing_in_train, collapse = ", "))
+  selected_vars <- setdiff(selected_vars, missing_in_train)
+}
 ```
 
 
+```{r}
+# fitting logisic regression on training data
+formula_lasso <- as.formula(paste("Injured ~", paste(selected_vars, collapse = " + ")))
+logit_model <- glm(formula_lasso, data = train_df, family = binomial(link = "logit"),
+                   control = list(maxit = 100))
+summary(logit_model)
+```
 
 
+```{r}
+# odds ratios and 95% confidence intervals
+logit_results <- tidy(logit_model, conf.int = TRUE, exponentiate = TRUE) |>
+  dplyr::rename(OR = estimate, CI_low = conf.low, CI_high = conf.high, p_value = p.value) |>
+  dplyr::filter(term != "(Intercept)")
 
+# (optional) order by absolute log-OR for readability in plots
+logit_results <- logit_results |>
+  dplyr::mutate(abs_log_or = abs(log(OR))) |>
+  dplyr::arrange(dplyr::desc(abs_log_or))
+
+head(logit_results)
+```
+
+
+```{r}
+# keep top N for a compact slide 
+N <- min(20, nrow(logit_results))
+plot_df <- logit_results[1:N, ]
+
+forest_plot <- ggplot(plot_df, aes(x = reorder(term, OR), y = OR)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_errorbar(aes(ymin = CI_low, ymax = CI_high), width = 0.2, color = "gray40") +
+  geom_point(size = 2.8, color = "#D02130") +
+  coord_flip() +
+  labs(title = "Logistic Regression on Lasso (λ₁se) Features",
+       subtitle = "Odds Ratios with 95% Wald Confidence Intervals",
+       x = "CMJ Metric",
+       y = "Odds Ratio (logit model)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
+
+forest_plot
+```
+
+
+# 6. ??? bootstrapping + lasso and get a list of the top contributors to injury risk that appear in most samples
