@@ -290,7 +290,6 @@ cv_lasso <- cv.glmnet(
 png("lasso_cv_plot.png", width = 800, height = 600, res = 150)
 plot(cv_lasso)
 title(main = "Lasso Cross-Validation (α = 1)", line = 2.5)
-dev.off()
 ```
 
 The left-dashed line in the figure above represents the log $/lambda /$ value that produces the highest mean AUC. The right dashed line represents the largest log $/ lamda /$ within one standard error of the minimum, which yields a simpler model with similar performance. We will extract the key lambda values below. 
@@ -398,27 +397,192 @@ head(logit_results)
 ```
 
 
+# 6. Elastic Net (Weighted)
+
 ```{r}
-# keep top N for a compact slide 
-N <- min(20, nrow(logit_results))
-plot_df <- logit_results[1:N, ]
+# ensure binary 0/1
+y_train <- ifelse(y_train == 1, 1, 0)
+y_test  <- ifelse(y_test  == 1, 1, 0)
 
-forest_plot <- ggplot(plot_df, aes(x = reorder(term, OR), y = OR)) +
-  geom_hline(yintercept = 1, linetype = "dashed") +
-  geom_errorbar(aes(ymin = CI_low, ymax = CI_high), width = 0.2, color = "gray40") +
-  geom_point(size = 2.8, color = "#D02130") +
-  coord_flip() +
-  labs(title = "Logistic Regression on Lasso (λ₁se) Features",
-       subtitle = "Odds Ratios with 95% Wald Confidence Intervals",
-       x = "CMJ Metric",
-       y = "Odds Ratio (logit model)") +
+# class-balanced weights for TRAIN rows only
+n1 <- sum(y_train == 1)
+n0 <- sum(y_train == 0) # counting how many observations belong to each class
+wts_train <- ifelse(y_train == 1, 0.5 / n1, 0.5 / n0) # the total weight of all non injured and injured rows equals 0.5, allowing glmnet to treat both classes equally
+
+# quick check
+table(y_train) # confirms class counts
+summary(wts_train) # confirms weight distribution
+```
+
+```{r}
+alphas_w <- seq(0, 1, by = 0.1) # creating alpha values
+cv_results_w <- data.frame(alpha = alphas_w, mean_AUC = NA_real_)
+
+for (i in seq_along(alphas_w)) {
+  cv_w <- cv.glmnet(
+    x = x_train, y = y_train,
+    family = "binomial",
+    alpha = alphas_w[i],
+    type.measure = "auc",
+    nfolds = 10,
+    weights = wts_train
+  )
+  cv_results_w$mean_AUC[i] <- max(cv_w$cvm)
+}
+
+cv_results_w
+best_alpha_w <- cv_results_w$alpha[which.max(cv_results_w$mean_AUC)]
+best_alpha_w
+```
+
+After weighting the training set, we received a different alpha of 0.2, but it still leans towards Ridge rather than Lasso, so we'll have limited feature selection.  
+
+```{r}
+# Plot mean AUC across alpha values (Weighted Elastic Net)
+best_idx_w <- which.max(cv_results_w$mean_AUC)
+best_alpha_w <- cv_results_w$alpha[best_idx_w]
+best_auc_w <- cv_results_w$mean_AUC[best_idx_w]
+
+alpha_plot_w <- ggplot(cv_results_w, aes(x = alpha, y = mean_AUC)) +
+  geom_line(color = "#1f77b4", linewidth = 1) +
+  geom_point(size = 3, color = "#1f77b4") +
+  geom_vline(xintercept = best_alpha_w, linetype = "dashed", color = "red", linewidth = 0.8) +
+  annotate(
+    "text",
+    x = best_alpha_w + 0.1,   # move text to the right of the dashed line
+    y = best_auc_w + 0.002,   # move text slightly above
+    label = paste0("Best α = ", round(best_alpha_w, 2), "\nAUC = ", round(best_auc_w, 3)),
+    color = "red",
+    size = 3,
+    hjust = 0
+  ) +
+  labs(
+    title = "Mean AUC Across Alpha Values (Weighted Elastic Net)",
+    subtitle = "Class-weighted 10-fold CV balancing Injured (6%) and Non-Injured (94%) jumps",
+    x = expression(alpha ~ "(Penalty Mix: Ridge → Lasso)"),
+    y = "Mean AUC (10-Fold CV, Weighted)"
+  ) +
   theme_minimal(base_size = 12) +
-  theme(plot.title = element_text(face = "bold"),
-        axis.title = element_text(face = "bold"),
-        panel.grid.minor = element_blank())
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    axis.title = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
 
-forest_plot
+alpha_plot_w
+
+
+ggsave("weighted_alpha_values.png", plot = alpha_plot_w, width = 6, height = 4, units = "in", dpi = 300)
 ```
 
 
-# 6. ??? bootstrapping + lasso and get a list of the top contributors to injury risk that appear in most samples
+```{r}
+# run elastic net with that alpha (still using class weights)
+cv_elnet_w <- cv.glmnet(
+  x = x_train, 
+  y = y_train,
+  family = "binomial",
+  alpha = best_alpha_w,
+  type.measure = "auc",
+  nfolds = 10,
+  weights = wts_train
+)
+
+# plot the cross-validation results
+plot(cv_elnet_w)
+title(main = paste("Elastic Net CV (Weighted, α =", best_alpha_w, ")"), line = 2.5)
+
+png("elasticnet_plot_weighted.png", width = 800, height = 600, res = 150)
+```
+
+
+```{r}
+# extracting the best lambda (penalty)
+best_lambda_w <- cv_elnet_w$lambda.min
+best_lambda_w
+
+# view coefficients at best alpha/lambda
+coef_elnet_w <- coef(cv_elnet_w, s = "lambda.min")
+coef_elnet_w
+```
+
+For the same reasons as our previous Elastic Net attempt, because our alpha value stayed closely to 0, this was practically Ridge. So, while it handled multicollinearity of our variables, it did not shrink coefficients to zero, meaning there was no variable selection. We will now do Lasso with our weighted classes. 
+
+# 7. Lasso (Weighted)
+
+```{r}
+# cross-validated Lasso with class weights
+cv_lasso_w <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  family = "binomial",
+  alpha = 1,                 # Lasso
+  type.measure = "auc",
+  nfolds = 10,
+  weights = wts_train        
+)
+```
+
+
+```{r}
+# plotting CV curve
+plot(cv_lasso_w)
+title(main = "Lasso Cross-Validation (Weighted, α = 1)", line = 2.5)
+png("lasso_cv_plot_weighted.png", width = 800, height = 600, res = 150)
+
+# Extract key lambdas
+lambda_min_w <- cv_lasso_w$lambda.min
+lambda_1se_w <- cv_lasso_w$lambda.1se
+lambda_min_w; lambda_1se_w
+
+```
+
+Lambda min of 0.00022 yielded the highest AUC during traning, and lambda 1se = 0.00056 represents a simpler model within one standard error of the minimum. The cross-validation curve shows that the model performance steadily increase as lambda decreased, peaking near 0.64. The gap between lambda min and lambda 1se is small, indicating that the simpler lambda 1se model sacrifices minimal predictive performance while retaining fewer predictors. 
+
+```{r}
+# Coefficients & selected features at λ_min and λ_1se (weighted)
+coef_min_w <- coef(cv_lasso_w, s = "lambda.min")
+coef_1se_w <- coef(cv_lasso_w, s = "lambda.1se")
+
+nonzero_min_w <- rownames(coef_min_w)[coef_min_w[, 1] != 0]
+nonzero_1se_w <- rownames(coef_1se_w)[coef_1se_w[, 1] != 0]
+
+nonzero_1se_w     # inspect
+length(nonzero_1se_w); length(nonzero_min_w)
+```
+
+From the above output, we see our lambda 1se model yielded 43 nonzero predictors, a meaningful reduction from the 73 predictors retained by Elastic Net. 
+
+```{r}
+# test-set performance: λ_min vs λ_1se (weighted)
+p_min_w <- as.numeric(predict(cv_lasso_w, newx = x_test, s = "lambda.min", type = "response"))
+p_1se_w <- as.numeric(predict(cv_lasso_w, newx = x_test, s = "lambda.1se", type = "response"))
+
+roc_min_w <- roc(y_test, p_min_w, quiet = TRUE)
+roc_1se_w <- roc(y_test, p_1se_w, quiet = TRUE)
+
+auc_min_w <- as.numeric(auc(roc_min_w))
+auc_1se_w <- as.numeric(auc(roc_1se_w))
+auc_min_w; auc_1se_w
+
+# Plot both weighted ROC curves
+plot(roc_min_w, col = "#D02130", lwd = 2,
+     main = paste0("Test ROC — Weighted Lasso: λ_min vs λ_1se\n",
+                   "AUC(min) = ", round(auc_min_w, 3),
+                   " | AUC(1se) = ", round(auc_1se_w, 3)))
+lines(roc_1se_w, col = "#1f77b4", lwd = 2)
+legend("bottomright", legend = c("λ_min (weighted)", "λ_1se (weighted)"),
+       col = c("#D02130", "#1f77b4"), lwd = 2, bty = "n")
+
+```
+
+The above graph shows the discriminatory ability of both the lambda min and lambda 1se model, showing how well they separate injured from non-injured jumps. The ROC curve plots sensitivity (true positive rate) vs. specificity (false positive rate). The AUC is a summary measure with 0.5 meaning random guessing and 1 being perfect discrimination. Because both lambda min and lambda 1se were only slightly above 0.5, this means our models struggle to separate the two groups on the test set. Similarly, looking at the ROC curves, we see both the red and the blue line hug diagonal, meaning the model's predictions are only slightly better than random. 
+
+This altogether implies that injury risk is not well explained by a purely linear combination of these CMJ metrics. 
+
+
+Yet, this still performed feature selection under penalized regularization. This means it removed noisy, redundant, and collinear predictors from the original 70+ CMJ metrics. The 43 variables it retained are those with the strongest linear association to injury. If we apply this subset to something like XGBoosting to perform the prediciton, this model does not require linearity and, instead, captures non-linear interactions automatically. We can apply this subset as the starting point for our future predictive model to avoid overfitting on noise from the original dataset, shrink training time and improve interpretability, and retian variables with provel importance. 
+
+# 8. ??? bootstrapping + lasso and get a list of the top contributors to injury risk that appear in most samples
