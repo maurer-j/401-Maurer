@@ -1,0 +1,173 @@
+---
+title: "Injury_Data"
+output: html_document
+date: "2025-09-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/jordy/OneDrive/Documents/Coach_Scott/Injuries")
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r setup, include=FALSE}
+# loading necessary libraries
+library(dplyr)
+library(readr)
+library(lubridate)
+```
+
+
+```{r setup, include=FALSE}
+setwd("C:/Users/jordy/OneDrive/Documents/Coach_Scott/Injuries")
+# reading in injuries
+aug_inj <- read.csv("Injury Report August.csv")
+sep_inj <- read.csv("Injury Report September.csv")
+oct_inj <- read.csv("October Injury Report.csv")
+nov_inj <- read.csv("November Inj.csv")
+jan_inj <- read.csv("Jan_Injuries.csv")
+march_inj <- read.csv("March_Injuries.csv")
+april_inj <- read.csv("April Updated.csv")
+may_inj <- read.csv("May_Injuries.csv")
+```
+
+
+# 1. Cleaning the Individual Datasets Prior to Combination
+```{r}
+# August: Removing unnecessary columns
+aug_inj_clean <- aug_inj %>%
+  select(-Teams, -ProblemReportedBy, -IncidentReportCreatedBy, -DateOfReturn, -CurrentStatus, -ReportedDate, -IncidentReportCreatedOnDate)
+
+# August: Turning the 'ProblemDate' variable into the proper date format
+aug_inj_clean$ProblemDate <- mdy(substr(aug_inj_clean$ProblemDate, 5, 15))
+str(aug_inj_clean$ProblemDate)
+
+# September: Removing unnecessary columns
+sep_inj_clean <- sep_inj %>%
+  select(-Teams, -ProblemReportedBy, -IncidentReportCreatedBy, -DateOfReturn, -CurrentStatus, -ReportedDate, -IncidentReportCreatedOnDate) %>%
+  rename(ID = X)
+
+# September: Turning the 'ProblemDate' variable into the proper date format
+sep_inj_clean$ProblemDate <- mdy(substr(sep_inj_clean$ProblemDate, 5, 15))
+str(sep_inj_clean$ProblemDate)
+
+# October: Removing unnecessary columns
+oct_inj_clean <- oct_inj %>%
+  select(-Teams, -ProblemReportedBy, -IncidentReportCreatedBy, -DateOfReturn, -CurrentStatus, -ReportedDate, -IncidentReportCreatedOnDate)
+
+# October: Turning the 'ProblemDate' variable into the proper date format
+oct_inj_clean$ProblemDate <- mdy(substr(oct_inj_clean$ProblemDate, 5, 15))
+str(oct_inj_clean$ProblemDate)
+
+# November: Removing unnecessary columns and Renaming column for consistency across datasets
+nov_inj_clean <- nov_inj %>%
+  select(-ProblemReportedBy, -IncidentReportCreatedBy, -DateOfReturn, -CurrentStatus, -ReportedDate, -IncidentReportCreatedOnDate) %>%
+  rename(ID = Teams)
+
+# November: Turning the 'ProblemDate' variable into the proper date format
+nov_inj_clean$ProblemDate <- mdy(substr(nov_inj_clean$ProblemDate, 5, 15))
+str(nov_inj_clean$ProblemDate)
+
+# January: Removing unnecessary columns
+jan_inj_clean <- jan_inj %>%
+  select(-Expected.Return.Date, -Actual.Return.Date, -Days.Out, -Problem.Status, -Reported.Date)
+
+# January: Renaming columns for consistency across datasets
+jan_inj_clean <- jan_inj_clean %>%
+  rename(ID = ID.) %>%
+  rename(ProblemDate = Problem.Date) %>%
+  rename(InjuryType = Condition) %>%
+  rename(BodyPart = Body.Part) %>%
+  rename(AffectedArea = Affected.Area) %>% rename(Side = Problem.Side) %>%
+  rename(BodyPartName = Problem.Sites)
+
+# January: Turning the 'ProblemDate' variable into the proper date format
+jan_inj_clean$ProblemDate <- mdy_hm(jan_inj_clean$ProblemDate)
+jan_inj_clean$ProblemDate <- as.Date(jan_inj_clean$ProblemDate)
+str(jan_inj_clean$ProblemDate)
+
+# March: Removing unnecessary columns and renaming for consistency
+march_inj_clean <- march_inj %>%
+  select(-Problem.Created.Date.Time, -Expected.Return.Date, -Actual.Return.Date, -Days.Out, -Problem.Status, -Reported.Date, -Privacy.Level, -Diagnosis.Code, -Problem.Reported.By) %>%
+  rename(ID = Code) %>%
+  rename(ProblemDate = Problem.Date) %>%
+  rename(BodyPart = Body.Part) %>%
+  rename(AffectedArea = Affected.Area) %>%
+  rename(Side = Problem.Side) %>%
+  rename(InjuryType = Condition) %>%
+  rename(BodyPartName = Problem.Sites)
+
+# March: Turning the 'ProblemDate' variable into the proper date format
+march_inj_clean$ProblemDate <- mdy_hm(march_inj_clean$ProblemDate)
+march_inj_clean$ProblemDate <- as.Date(march_inj_clean$ProblemDate)
+str(march_inj_clean$ProblemDate)
+
+# April: Removing unnecessary columns and renaming for consistency
+april_inj_clean <- april_inj %>%
+  select(-Problem.Created.Date.Time, -Expected.Return.Date, -Actual.Return.Date, -Days.Out, -Problem.Status, -Reported.Date, -Privacy.Level, -Diagnosis.Code, -Problem.Reported.By, -Problem.Reported.By.Provider.Identifier, -Datalys.Injury.Type) %>%
+  rename(ID = Code) %>%
+  rename(ProblemDate = Problem.Date) %>%
+  rename(BodyPart = Body.Part) %>%
+  rename(AffectedArea = Affected.Area) %>%
+  rename(Side = Problem.Side) %>%
+  rename(InjuryType = Condition) %>%
+  rename(BodyPartName = Problem.Sites)
+
+# April: Turning the 'ProblemDate' variable into the proper date format
+april_inj_clean$ProblemDate <- mdy_hm(april_inj_clean$ProblemDate)
+april_inj_clean$ProblemDate <- as.Date(april_inj_clean$ProblemDate)
+str(april_inj_clean$ProblemDate)
+
+# May: Removing unnecessary columns and renaming for consistency
+may_inj_clean <- may_inj %>%
+  select(-Problem.Created.Date.Time, -Expected.Return.Date, -Actual.Return.Date, -Days.Out, -Problem.Status, -Reported.Date, -Privacy.Level, -Diagnosis.Code, -Problem.Reported.By, -Problem.Reported.By.Provider.Identifier, -Datalys.Injury.Type, -Problem.Description) %>%
+  rename(ID = Teams) %>%
+  rename(ProblemDate = Problem.Date) %>%
+  rename(BodyPart = Body.Part) %>%
+  rename(AffectedArea = Affected.Area) %>%
+  rename(Side = Problem.Side) %>%
+  rename(InjuryType = Condition) %>%
+  rename(BodyPartName = Problem.Sites)
+
+# May: Turning the 'ProblemDate' variable into the proper date format
+may_inj_clean$ProblemDate <- mdy_hm(may_inj_clean$ProblemDate)
+may_inj_clean$ProblemDate <- as.Date(may_inj_clean$ProblemDate)
+str(may_inj_clean$ProblemDate)
+```
+
+# 2. Combining the cleaned datasets prior to filtering for specific injury types
+```{r}
+combined_inj <- bind_rows(aug_inj_clean, sep_inj_clean, oct_inj_clean, nov_inj_clean, jan_inj_clean, march_inj_clean, april_inj_clean, may_inj_clean)
+
+# checking format & combination accuracy
+head(combined_inj, 10)
+tail(combined_inj, 10)
+dim(combined_inj)
+```
+
+# 3. Filtering the data to exclude injuries that may not be predicted w/ guidance from Coach Scott as to what to remove
+```{r}
+# seeing the different 'InjuryType' options to determine which to keep
+unique(combined_inj$InjuryType)
+
+# defining the injury types to exclude
+exclude <- c("Contusion", "Insect Bite", "Other Nervous System Disorder", "Other Gastrointestinal Disorder",
+             "Asthma", "Other Cardiovascular Disorder", "Mononucleosis", 
+             "Pneumonia", "Kidney Injury", "Influenza", "Allergic Reaction", "Other", "Other Injury to Head", "Scheuermann's Disease", "Complaining of pain in toe (finding)", "Cramps")
+```
+
+
+```{r}
+# removing these injuries from the data
+filtered_inj <- combined_inj %>%
+  filter(!InjuryType %in% exclude)
+
+# seeing the different 'InjuryType' options after filtering
+unique(filtered_inj$InjuryType)
+dim(filtered_inj)
+```
+
+# 4. Writing the final injury data to a .csv to be combined with the force plate data 
+```{r}
+write.csv(filtered_inj, "injury_data.csv", row.names = FALSE)
+```
+
