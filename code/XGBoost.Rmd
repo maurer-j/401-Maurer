@@ -1,0 +1,221 @@
+---
+title: "Prediction with XGBoost"
+output: html_document
+date: "2025-10-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(42) # ensures reproducibility across all chunks
+library(readr)
+library(dplyr)
+library(xgboost)
+library(pROC)
+library(ggplot2)
+library(Matrix)
+library(stringr)
+library(knitr)
+library(kableExtra)
+library(webshot2)
+```
+
+
+# 1. Loading and Inspecting the Data
+
+```{r}
+# setting directory (probably needs to be changed later)
+getwd()
+setwd("C:\\Users\\jordy\\OneDrive\\Documents\\Coach_Scott\\Injuries")
+dat <- read.csv("lasso_selected_43vars.csv")
+str(dat)
+```
+
+# 2. Splitting into Training and Testing Set
+
+```{r}
+train_idx <- caret::createDataPartition(dat$Injured, p = 0.80, list = FALSE)
+train <- dat[train_idx, ]
+test  <- dat[-train_idx, ]
+
+# Matrix form for XGBoost (guarantee numeric)
+x_train <- train |> dplyr::select(-Injured) |> data.matrix()
+y_train <- train$Injured
+
+x_test  <- test  |> dplyr::select(-Injured) |> data.matrix()
+y_test  <- test$Injured
+```
+
+We split the data into a training (80%) and testing (20%) set just like in feature selection. Again, we do not manually standardize the variables because tree-based methods are scale-invariant. 
+
+# 3. Handling Class Imbalance Using scale_pos_weight
+
+As described before, we are dealing with approximately 6% of the jumpes classified as "Injured," making it highly imbalanced. We will now compute the imbalance ratio and set up the XGBoost DMatrix objects. 
+
+```{r}
+# counting number of injured (1) and non-injured (0) jumps in the training data
+pos <- sum(y_train == 1)
+neg <- sum(y_train == 0)
+
+# calculating the ration for XGBoost's weighting
+scale_pos_weight <- neg / pos
+
+# printing out the imbalance info
+cat("Injured (positive):", pos, "\nNon-injured (negative):", neg,
+    "\nscale_pos_weight =", round(scale_pos_weight, 2), "\n")
+```
+
+In the training data, only 1,103 out of all training jumps are injury events. So, each injured jump will be treated as roughly 18 times more important than non-injured jumps during model training. This balances the gradient updates so the model pays attention to both classes equally. 
+
+```{r}
+# putting this output in a clean table format for report
+
+# summarize imbalance results
+imbalance_table <- data.frame(
+  Class = c("Non-Injured (0)", "Injured (1)", "scale_pos_weight"),
+  Count = c(neg, pos, round(scale_pos_weight, 2))
+)
+
+# format numeric cells neatly
+imbalance_table$Count <- format(imbalance_table$Count, big.mark = ",")
+
+# create a temporary HTML file of the table
+table_file <- "table1_class_imbalance.html"
+image_file <- "table1_class_imbalance.png"
+
+kbl(imbalance_table,
+    caption = "Table 1: Class Imbalance Summary — Training Set Only",
+    col.names = c("Class / Parameter", "Count"),
+    align = "lc",
+    format = "html") %>%
+  kable_styling(full_width = FALSE, position = "center", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2, color = "white", background = "#D02130") %>%
+  save_kable(file = table_file)
+
+# convert the HTML table to a PNG image
+webshot2::webshot(table_file, file = image_file, vwidth = 800, vheight = 600)
+
+cat("✅ Saved as:", image_file, "\n")
+```
+
+# 4. Building DMatrix Objects (Required by XGBoost)
+
+```{r}
+dtrain <- xgboost::xgb.DMatrix(data = x_train, label = y_train)
+dtest  <- xgboost::xgb.DMatrix(data = x_test,  label = y_test)
+watch  <- list(train = dtrain, eval = dtest)
+```
+
+# 5. Cross-Validation and Parameter Tuning
+
+```{r}
+# each row is one candidate configuration to try in CV.
+param_grid <- expand.grid(
+  eta = c(0.05, 0.10),        # learning rate: smaller = slower but safer training
+  max_depth = c(3, 5, 7),     # tree depth: higher can fit more complex interactions
+  min_child_weight = c(1, 5), # min sum of instance weight in a child: higher = more conservative splits
+  subsample = c(0.7, 0.9),    # row subsampling per tree: <1 adds randomness & reduces overfitting
+  colsample_bytree = c(0.7, 0.9) # column subsampling per tree: same idea, for features
+)
+
+nrow(param_grid) # checking dimensions to see if it worked
+
+# object to store the best result we see across the grid
+best <- list(auc = -Inf, params = NULL, nrounds = NULL, i = NA)
+```
+
+We will now loop through the grid. For each configuration we run 5-fold cross-validation on the training set, optimize AUC, and use early stopping to pick the best number of trees (nrounds). We will keep the best model seen so far. 
+
+```{r}
+dir.create("results", showWarnings = FALSE)
+
+cv_summaries <- vector("list", nrow(param_grid))  # storing the results
+
+if (file.exists("results/xgb_best_model_info.rds") &&
+    file.exists("results/xgb_cv_results.rds")) {
+  best       <- readRDS("results/xgb_best_model_info.rds")
+  cv_results <- readRDS("results/xgb_cv_results.rds")
+  message("✅ Loaded saved CV results. Skipping grid search.")
+} else {
+for (i in seq_len(nrow(param_grid))) {
+  p <- param_grid[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = 1,
+    alpha            = 0,
+    scale_pos_weight = scale_pos_weight,  # from Step 3
+    tree_method      = "hist"
+  )
+
+  message(sprintf(
+    "CV %02d/%02d | eta=%.2f, depth=%d, mcw=%d, subs=%.2f, cols=%.2f",
+    i, nrow(param_grid), p$eta, p$max_depth, p$min_child_weight, p$subsample, p$colsample_bytree
+  ))
+
+  cv <- tryCatch(
+    xgboost::xgb.cv(
+      params = params,
+      data = dtrain,
+      nrounds = 2000,            # upper bound; early stopping picks the winner
+      nfold = 5,
+      stratified = TRUE,
+      early_stopping_rounds = 50,
+      verbose = 0
+    ),
+    error = function(e) {
+      warning(sprintf("Skipping combo %d due to error: %s", i, e$message))
+      return(NULL)
+    }
+  )
+  if (is.null(cv)) next
+
+  auc_vec   <- cv$evaluation_log$test_auc_mean
+  mean_auc  <- max(auc_vec, na.rm = TRUE)
+  best_iter <- cv$best_iteration
+  if (is.null(best_iter) || is.na(best_iter)) best_iter <- which.max(auc_vec)
+
+  cv_summaries[[i]] <- data.frame(
+    i = i,
+    eta = p$eta,
+    max_depth = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    best_auc = mean_auc,
+    best_nrounds = best_iter
+  )
+
+  if (mean_auc > best$auc) {
+    best <- list(auc = mean_auc, params = params, nrounds = best_iter, i = i)
+  }
+
+  message(sprintf("  -> combo AUC: %.4f at %d rounds", mean_auc, best_iter))
+}
+}
+```
+
+We'll save the cross validation results to avoid rerunning the for-loop again. 
+
+```{r}
+cv_results <- dplyr::bind_rows(cv_summaries[!sapply(cv_summaries, is.null)])
+  saveRDS(cv_results, "results/xgb_cv_results.rds")
+  saveRDS(best,       "results/xgb_best_model_info.rds")
+  message("✅ Saved: results/xgb_cv_results.rds and results/xgb_best_model_info.rds")
+```
+
+# 6. Train Final XGBoost Model Using Best Parameters
+
+We will now fit the final model using the optimal hyperparameters identified from the cross-validation search. We'll train on the entire training set, using best$nrounds for the number of boosting iterations, and then evaluate performance on the test set. 
+
+```{r}
+
+```
+
