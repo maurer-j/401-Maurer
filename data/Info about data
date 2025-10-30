@@ -1,2 +1,3 @@
-The actual force plate data file is extremely large after gaining access to the Hawkin Dynamics API. 
-So, the actual data will be stored in Google Drive. The link can be found in the ReadMe on the home page of the repo. 
+In this folder exists only the datasets related to injury. 
+The actual force plate data is extremely large after gaining access to the Hawkin Dynamics API. 
+So, the original force plate dataset, the excel file used to match athlete ID and athlete name, and the combined injury and CMJ datasets will be stored in Google Drive. The link can be found in the ReadMe on the home page of the repo. 
