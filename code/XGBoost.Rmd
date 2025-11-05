@@ -11,12 +11,14 @@ library(readr)
 library(dplyr)
 library(xgboost)
 library(pROC)
+library(PRROC)
 library(ggplot2)
 library(Matrix)
 library(stringr)
 library(knitr)
 library(kableExtra)
 library(webshot2)
+library(shapviz)
 ```
 
 
@@ -216,6 +218,271 @@ cv_results <- dplyr::bind_rows(cv_summaries[!sapply(cv_summaries, is.null)])
 We will now fit the final model using the optimal hyperparameters identified from the cross-validation search. We'll train on the entire training set, using best$nrounds for the number of boosting iterations, and then evaluate performance on the test set. 
 
 ```{r}
+# extracting best parameters and number of trees
+final_params  <- best$params
+final_nrounds <- best$nrounds
+
+cat("Best Parameters:\n")
+print(final_params)
+cat("\nOptimal Number of Boosting Rounds:", final_nrounds, "\n")
+```
+
+The above output shows us that the cross-validation process decided 756 trees was the optimal stopping point, where after that test AUC stopped improving. This is to be expected given our small learning rate of 0.05. 
+```{r}
+# train the final model on full training set 
+final_model <- xgboost::xgb.train(
+  params  = final_params,
+  data    = dtrain,
+  nrounds = final_nrounds,
+  watchlist = watch,         
+  verbose = 0 # hiding the long output because there will be 756 prints
+)
+
+# Save model as .rds for future reproducibility
+saveRDS(final_model, "results/final_xgb_model.rds")
+cat("✅ Final model saved as results/final_xgb_model.rds \n")
+```
+
+The above evaluates the model on the entire training set. 
+
+# 7. Evaluating the Final XGBoost Model on Test Data
+
+We will begin by getting the trained model to estimate probabilities that each test jump is an injured event (Injured = 1). 
+
+```{r}
+# testing predicted probabilities for the positive class (Injured)
+test_pred_prob <- predict(final_model, dtest)
+head(test_pred_prob)
+```
+
+We will now build the ROC curve and compute AUC score. 
+
+```{r}
+# compute ROC
+roc_obj <- pROC::roc(response = y_test, predictor = test_pred_prob)
+
+# AUC
+auc_value <- pROC::auc(roc_obj)
+
+# display
+cat("AUC =", round(auc_value, 3), "\n")
+
+# ROC curve plot
+plot(
+  roc_obj,
+  main = "ROC Curve for XGBoost - Test Set",
+  print.auc = TRUE,
+  legacy.axes = TRUE
+)
+```
+
+The above ROC curve shows the performance of the XGBoost model on the test set. The X-axis shows specificity, or the false positive rate. Lower values are better, meaning less of the non-injured jumps are incorrectly classified as "injured". The Y-axis shows the true positive rate, meaning the porportion of actual injuries correctly identified. Higher values mean the model catches more true injures. Because our curve stays well above the diagonal "random guessing" line with an AUC of 0.830, we can say in 83% of randomly paired injured vs. non-injured jumps, the injured jump is scored higher. This is strong predictive performance, especially given the imbalanced injury data. 
+
+We will now convert probabilities to class labels with a threshold of 0.5. We will rerun this later using a data-driven threshold like the F1 optimal value. 
+
+```{r}
+# converting probabilities to 0/1 class predictions using 0.5 cutoff
+test_pred_class <- ifelse(test_pred_prob >= 0.5, 1, 0)
+```
+
+Next, we'll compute confusion matrix, accuracy, precision, recall and F1. 
+
+```{r}
+# confusion matrix components
+tn <- sum(test_pred_class == 0 & y_test == 0)
+tp <- sum(test_pred_class == 1 & y_test == 1)
+fn <- sum(test_pred_class == 0 & y_test == 1)
+fp <- sum(test_pred_class == 1 & y_test == 0)
+
+# metrics
+accuracy  <- (tp + tn) / (tp + tn + fp + fn)
+precision <- tp / (tp + fp)
+recall    <- tp / (tp + fn)   # a.k.a sensitivity or true positive rate
+f1_score  <- 2 * (precision * recall) / (precision + recall)
+
+# print in clean format
+metrics <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall (Sensitivity)", "F1 Score"),
+  Value  = round(c(accuracy, precision, recall, f1_score), 3)
+)
+metrics
 
 ```
+
+From the above, we see that when a model predicts an injury, it is right only about 36% of the time. Further, the model only catches about 25% of actual injuries. Finally, our F1 score is low indicating an imbalance. Our model predicts "not injured" for everything which explains our high accuracy value. We will now find the best cutoff by maximizing F1 score. 
+
+```{r}
+# create all possible thresholds from 0 to 1
+thresholds <- seq(0, 1, by = 0.01)
+
+# for each threshold, calculate precision, recall, F1
+f1_scores <- sapply(thresholds, function(t) {
+  pred <- ifelse(test_pred_prob >= t, 1, 0)
+  
+  tp <- sum(pred == 1 & y_test == 1)
+  fp <- sum(pred == 1 & y_test == 0)
+  fn <- sum(pred == 0 & y_test == 1)
+  
+  precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+  
+  if (precision + recall == 0) return(0)
+  return(2 * precision * recall / (precision + recall))  # F1 score
+})
+
+# get best cutoff
+best_idx <- which.max(f1_scores)
+best_threshold <- thresholds[best_idx]
+best_f1 <- f1_scores[best_idx]
+
+cat("Optimal threshold =", best_threshold, "with F1 Score =", round(best_f1, 3), "\n")
+
+```
+
+We will now evaluate the model using this new cutoff rather than 0.5. 
+
+```{r}
+# apply best threshold
+test_pred_best <- ifelse(test_pred_prob >= best_threshold, 1, 0)
+
+# recompute confusion matrix metrics
+tp <- sum(test_pred_best == 1 & y_test == 1)
+tn <- sum(test_pred_best == 0 & y_test == 0)
+fp <- sum(test_pred_best == 1 & y_test == 0)
+fn <- sum(test_pred_best == 0 & y_test == 1)
+
+# metrics
+accuracy_best  <- (tp + tn) / (tp + tn + fp + fn)
+precision_best <- tp / (tp + fp)
+recall_best    <- tp / (tp + fn)
+f1_best        <- 2 * (precision_best * recall_best) / (precision_best + recall_best)
+
+data.frame(
+  Threshold = round(best_threshold, 3),
+  Accuracy = round(accuracy_best, 3),
+  Precision = round(precision_best, 3),
+  Recall = round(recall_best, 3),
+  F1 = round(f1_best, 3)
+)
+
+```
+
+With a new F1 score of 0.372, we have a better balance between precision and recall. We are effectively making the model more sensitive to catch more injuries at the cost of flagging a few more false positives. With this new threshold of 0.21, our precision slightly decreased but our recall increased substantially and our F1 score improved. This is exactly the case we want in order to catch more injuries. We will now create a precision-recall curve which may be better than ROC for imbalanced data. 
+
+We will now create a confusion matrix table using this optimal cutoff point. 
+
+```{r}
+# predictions using this optimal threshold
+test_pred_best <- ifelse(test_pred_prob >= best_threshold, 1, 0)
+
+# compute components of confusion matrix
+tn <- sum(test_pred_best == 0 & y_test == 0)
+fp <- sum(test_pred_best == 1 & y_test == 0)
+fn <- sum(test_pred_best == 0 & y_test == 1)
+tp <- sum(test_pred_best == 1 & y_test == 1)
+
+# put into a table format
+confusion_table <- data.frame(
+  Actual = c("Non-Injured (0)", "Injured (1)"),
+  `Predicted 0` = c(tn, fn),
+  `Predicted 1` = c(fp, tp)
+)
+
+# format into table in the same style as the others
+kbl(confusion_table,
+    caption = paste0("Table X: Confusion Matrix at Optimal Threshold (", round(best_threshold, 2), ")"),
+    col.names = c("Actual Class", "Predicted 0", "Predicted 1"),
+    align = "lcc",
+    format = "html") %>%
+  kable_styling(full_width = FALSE, position = "center", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2") %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:3, color = "white", background = "#D02130")  
+
+```
+
+From the confusion matrix, we see the model correctly identifies the vast majority of non-injure jumps as "not injured". This is expected since the dataset is highly imbalanced. In the case of injury prevention, we aren't necessarily as concerned with the false positives (257). The false negatives (159) are the missed injury cases. These are the most concerning, because missing an athlete at risk could lead to real injury. With this threshold, the true positives were 123, meaning the model catches 44% of all injuries (recall). 
+
+At the optimal threshold of 0.21 (chosen to maximize the F1-score), the model correctly classified 123 out of 282 true injury cases (Sensitivity = 43.6%). Although accuracy slightly decreased from 93.5% to 92.0%, recall significantly improved, meaning the model identifies more athletes at risk of injury which is more important in this context than overall accuracy.
+
+Because of the imbalance in our dataset, we will now create the Precision-Recall Curve which gives us more information than the ROC curve. 
+```{r}
+# compute precision-recall curve data
+pr_obj <- pr.curve(
+  scores.class0 = test_pred_prob[y_test == 1],  # predicted probabilities for actual injuries
+  scores.class1 = test_pred_prob[y_test == 0],
+  curve = TRUE
+)
+
+# plot Precision-Recall curve
+plot(
+  pr_obj,
+  main = "Precision–Recall Curve for XGBoost (Test Set)",
+  auc.main = FALSE,
+  lwd = 2,
+  col = "#D02130"
+)
+
+# add AUPRC (area under precision-recall curve)
+cat("AUPRC =", round(pr_obj$auc.integral, 3), "\n")
+```
+
+The Precision–Recall curve above demonstrates how the model’s ability to correctly identify injured jumps (recall) trades off with its correctness when it predicts an injury (precision). Because injuries make up only 6% of the data, the PR curve is a more informative diagnostic than the ROC curve. Our model achieves a maximum F1 score at threshold 0.21, where precision = 0.324 and recall = 0.436. This means the model correctly identifies ~43.6% of injuries while being correct about ~32.4% of its injury predictions—approximately five times better than random guessing. Performance degrades as recall increases beyond ~0.4, showing that the model cannot catch all injuries without incurring many false alarms.
+
+
+# SHAP Value Computation and Interpretation
+
+We will begin by computing SHAP values on the test set to help explain why the mdoel makes each prediction and which CMJ variables contribute most to injury risk predictions. 
+
+```{r}
+# SHAP contributions for each test row and feature (+ a BIAS/base value column)
+shap_test <- predict(final_model, dtest, predcontrib = TRUE)
+
+# put into a data frame and attach feature names
+shap_test <- as.data.frame(shap_test)
+colnames(shap_test) <- c(colnames(x_test), "BIAS")
+
+# drop the baseline (intercept) column for importance summaries
+shap_only <- shap_test[, setdiff(names(shap_test), "BIAS")]
+
+```
+
+We will now rank features by how influential they are overall, ignoring positive or negative influence on injury risk by taking the mean absolute SHAP. 
+
+```{r}
+shap_importance <- shap_only |>
+  summarize(across(everything(), ~ mean(abs(.), na.rm = TRUE))) |>
+  tidyr::pivot_longer(everything(),
+                      names_to = "Feature",
+                      values_to = "MeanAbsSHAP") |>
+  arrange(desc(MeanAbsSHAP))
+
+head(shap_importance, 10)
+```
+
+The variables shown above cause the largest changes in predicted injury risk. Not necessarily higher/lower but influence either way. 
+
+```{r}
+topN <- 15
+
+# only keep the first two columns — "Feature" and "Mean|SHAP|"
+imp_tbl <- shap_importance[1:topN, 1:2]
+
+kbl(
+  imp_tbl,
+  caption = "Table X: Global Feature Importance via Mean |SHAP| (Test Set)",
+  col.names = c("Feature", "Mean |SHAP| (log-odds)"),
+  align = c("l", "r"),  
+  digits = 4,
+  format = "html"
+) |>
+  kable_styling(full_width = FALSE, position = "center", font_size = 12) |>
+  row_spec(0, bold = TRUE, background = "#f2f2f2") |>
+  column_spec(1, bold = TRUE) |>
+  column_spec(2, color = "white", background = "#D02130")
+
+```
+
+This table displays the top 15 CMJ metrics with the most influence on injury prediction as described in our XGBoost model. 8 of which come from the propulsive phase of the jump with the most coming from average propulsive velocity. 
+
 
