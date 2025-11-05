@@ -10,6 +10,12 @@ Which force plate metrics can be leveraged to proactively identify athletes at h
 Denison University Strength and Conditioning (force plate data) and Denison University Athletic Training Room (injury data)
 
 ## Methods
+Feature Selection:
+Elastic Net Regularization 
+Lasso Regularization
+
+Prediction:
+XGBoosting with SHAP Values
 
 ## Expected Timeline
 <img width="1036" height="341" alt="image" src="https://github.com/user-attachments/assets/19c59ada-046f-4811-bccc-49eb65b01902" />
