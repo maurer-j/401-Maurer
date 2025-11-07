@@ -4,6 +4,8 @@ output: html_document
 date: "2025-09-15"
 ---
 
+# This is the file that connects with the Hawkin API to pull force plate jumps for the 2024-2025 academic year. For ease of use, the pulled jumps were then turned into a .csv file that will be referenced in future code. Only authorized personnel can gain access to the API as it contains sensitive athlete information. After retrieval, athlete names were matched with a unique identifier, then removed after combination with the injury dataset. 
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -22,12 +24,15 @@ devtools::install_github("HawkinDynamics/hawkinR")
 # Input your secret integration key where I have 'secretKey'
 
 ```{r}
+# necessary packages
 library(hawkinR)
 library(tidyverse)
 library(dplyr)
 library(purrr)
 library(lubridate)
 library(stringr)
+
+# API code for authorized use only
 get_access('vPKBLq.le5HM5LYjRerJE5nDuSo8MPuEo5v7', region = "Americas")
 testIds <- get_testTypes()
 Roster <- get_athletes()
