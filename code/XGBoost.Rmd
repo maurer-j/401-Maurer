@@ -1,8 +1,11 @@
 ---
 title: "Prediction with XGBoost"
 output: html_document
+author: "Jordyn Maurer"
 date: "2025-10-29"
 ---
+
+The following code trains an XGBoosting model to predict injured cases in Denison University athletes. From there, it uses SHAP values to determine CMJ metrics with the most influence on injury prediction. It uses the "lasso_selected_43vars.csv" created from the Feature_Selection.Rmd. 
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)

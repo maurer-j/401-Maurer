@@ -1,11 +1,14 @@
 ---
 title: "combining_cmj_injury"
 output: html_document
+author: "Jordyn Maurer"
 date: "2025-10-10"
 ---
 
+The following file combines the force plate and injury datasets into one large .csv for future analysis. It uses "CMJ_All_De_Identified.csv" found in the Google Drive and "injury_data.csv" found in both Google Drive and github. We removed any extraneous variables and created our dependent variable "Injured" which indicates a jump occurring at least 4 weeks prior to an athlete injury. The final .csv after combining is "final_data.csv" and can be found in the Google Drive, not the github repo, due to its large size. 
+
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+# knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
@@ -16,8 +19,9 @@ library(lubridate)
 ```
 
 
+
 # 1. Loading CMJ Data and Analyzing Structure Before Merging
-```{r}
+```{r, warning=FALSE, message=FALSE}
 # reading in the cmj data
 cmj <- read_csv("CMJ_All_De_Identified.csv")
 
@@ -65,6 +69,7 @@ dim(cmj)
 ```
 
 After filtering out columns with over 14,000 NA values, we went from 311 variables to 93: a much easier dataset to merge. We'll now check for any unnecessary variables which will include any metrics not worthy of including in our analysis. 
+
 ```{r}
 # seeing the remaining variable names
 names(cmj)
@@ -169,7 +174,7 @@ table(merged_data_2$Injured)
 sum(is.na(merged_data_2$days_before))
 ```
 
-Using 2 weeks, we have 761 injured cases vs. 25,193 non-injured cases, a large imbalance. We also see that days_before produce 15803 NA values, meaning these were the total jumps from non-injured athletes. We will now extend that window to 4 weeks to see if we capture more injured cases and slower-developing fatigue patterns. 
+Using 2 weeks, we have 761 injured cases vs. 25,193 non-injured cases, a large imbalance. We also see that days_before produced 15803 NA values, meaning these were the total jumps from non-injured athletes. We will now extend that window to 4 weeks to see if we capture more injured cases and slower-developing fatigue patterns. 
 
 ```{r}
 # creating a dataset with 4 weeks leading up to injuries
@@ -194,4 +199,5 @@ With 4 weeks as our window, we now have 1385 injured cases vs. 24569 non-injured
 ```{r}
 write.csv(merged_data_4, "final_data.csv", row.names = FALSE)
 ```
+
 
