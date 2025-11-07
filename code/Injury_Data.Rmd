@@ -1,8 +1,11 @@
 ---
 title: "Injury_Data"
 output: html_document
+author: "Jordyn Maurer"
 date: "2025-09-29"
 ---
+
+This file involves the combination of 8 injury datasets. Unnecessary columns and injuries such as illnesses, allergies, bug bites, etc. were removed from the final combined dataset.The final dataset can be found in the github repo or Google Drive as "injury_data.csv".  
 
 ```{r setup, include=FALSE}
 knitr::opts_knit$set(root.dir = "C:/Users/jordy/OneDrive/Documents/Coach_Scott/Injuries")
@@ -18,7 +21,9 @@ library(lubridate)
 
 
 ```{r setup, include=FALSE}
+# replace with user's personal directory
 setwd("C:/Users/jordy/OneDrive/Documents/Coach_Scott/Injuries")
+
 # reading in injuries
 aug_inj <- read.csv("Injury Report August.csv")
 sep_inj <- read.csv("Injury Report September.csv")
