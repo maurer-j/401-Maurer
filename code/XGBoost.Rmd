@@ -469,7 +469,7 @@ cat("AUPRC =", round(pr_obj$auc.integral, 3), "\n")
 The Precision–Recall curve above demonstrates how the model’s ability to correctly identify injured jumps (recall) trades off with its correctness when it predicts an injury (precision). Because injuries make up only 6% of the data, the PR curve is a more informative diagnostic than the ROC curve. Our model achieves a maximum F1 score at threshold 0.2, where precision = 0.296 and recall = 0.45. This means the model correctly identifies ~45% of injuries while being correct about ~29.6% of its injury predictions. Performance degrades as recall increases beyond ~0.4, showing that the model cannot catch all injuries without incurring many false alarms.
 
 
-# SHAP Value Computation and Interpretation
+# 8. SHAP Value Computation and Interpretation
 
 We will begin by computing SHAP values on the test set to help explain why the model makes each prediction and which CMJ variables contribute most to injury risk predictions. 
 
