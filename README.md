@@ -10,7 +10,7 @@ Denison University Strength and Conditioning (force plate data) and Denison Univ
 
 ## Methods
 Feature Selection:
-Elastic Net Regularization & Lasso Regularization
+Weighted Elastic Net Regularization & Weighted Lasso Regularization
 
 Prediction:
 XGBoosting with SHAP Values
