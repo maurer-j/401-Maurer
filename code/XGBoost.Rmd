@@ -61,7 +61,7 @@ As described before, we are dealing with approximately 6% of the jumps classifie
 pos <- sum(y_train == 1)
 neg <- sum(y_train == 0)
 
-# calculating the ration for XGBoost's weighting
+# calculating the ratio for XGBoost's weighting
 scale_pos_weight <- neg / pos
 
 # printing out the imbalance info
@@ -69,7 +69,7 @@ cat("Injured (positive):", pos, "\nNon-injured (negative):", neg,
     "\nscale_pos_weight =", round(scale_pos_weight, 2), "\n")
 ```
 
-In the training data, only 1,103 out of all training jumps are injury events. So, each injured jump will be treated as roughly 18 times more important than non-injured jumps during model training. This balances the gradient updates so the model pays attention to both classes equally. 
+In the training data, only 1,103 out of all training jumps are injury events. So, each injured jump will be treated as roughly 18 times more important than non-injured jumps during model training. This balances the gradient so the model pays attention to both classes equally. 
 
 ```{r}
 # putting this output in a clean table format for report
@@ -459,7 +459,7 @@ pr_obj <- pr.curve(
 png("prerecall_XGBoost.png", width = 800, height = 600, res = 150)
 plot(
   pr_obj,
-  main = "Figure 7. Precision–Recall Curve for XGBoost (Test Set)",
+  main = "Figure 7. Precision–Recall Curve for XGBoost",
   auc.main = FALSE,
   lwd = 2,
   col = "black"

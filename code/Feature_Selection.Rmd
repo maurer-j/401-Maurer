@@ -1,8 +1,12 @@
 ---
 title: "Feature_Selection"
 output: html_document
+author: "Jordyn Maurer"
 date: "2025-10-13"
 ---
+
+
+The following code seeks to decrease the number of injury predictors using Elastic Net and Lasso regularization. To begin, the file explores correlations among different CMJ variables, identifies a need for re-weighting the non-injured class, completes elastic net, moves to lasso regularization, and writes the final set of predictors to a .csv ("lasso_selected_43vars.csv") for use in the XGBoosting model. This .csv can be found in the Google Drive and github repository for reference. 
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -40,11 +44,11 @@ str(data)
 
 summary(data$Injured)
 
-# making sure INjured is numeric
+# making sure Injured is numeric
 data$Injured <- as.numeric(data$Injured)
 ```
 
-Now, we need to remove identifiers and non-numeric colummns. These identifiers include IDs, organizations, dates, and injury types.We will remove all character variables as well as "days_before" which was a helper variable to identify injured vs. non-injured jumps.  
+Now, we need to remove identifiers and non-numeric colummns. These identifiers include IDs, organizations, dates, and injury types. We will remove all character variables as well as "days_before" which was a helper variable to identify injured vs. non-injured jumps.  
 
 ```{r}
 # removing identifiable information that will not be involved in the study and keeping only numeric data.  
@@ -327,7 +331,7 @@ coef_elnet_w <- coef(cv_elnet_w, s = "lambda.min")
 coef_elnet_w
 ```
 
-For the same reasons as our previous Elastic Net attempt, because our alpha value stayed closely to 0, this was practically Ridge. So, while it handled multicollinearity of our variables, it did not shrink coefficients to zero, meaning there was no variable selection. We will now do Lasso with our weighted classes. 
+Because our alpha value stayed closely to 0, this was practically Ridge. So, while it handled multicollinearity of our variables, it did not shrink coefficients to zero, meaning there was no variable selection. We will now do Lasso with our weighted classes. 
 
 # 5. Lasso (Weighted)
 
@@ -399,6 +403,7 @@ legend("bottomright", legend = c("λ_min (weighted)", "λ_1se (weighted)"),
        col = c("#D02130", "#1f77b4"), lwd = 2, bty = "n")
 
 ```
+
 
 The above graph shows the discriminatory ability of both the lambda min and lambda 1se model, showing how well they separate injured from non-injured jumps. The ROC curve plots sensitivity (true positive rate) vs. specificity (false positive rate). The AUC is a summary measure with 0.5 meaning random guessing and 1 being perfect discrimination. Because both lambda min and lambda 1se were only slightly above 0.5, this means our models struggle to separate the two groups on the test set. Similarly, looking at the ROC curves, we see both the red and the blue line hug diagonal, meaning the model's predictions are only slightly better than random. 
 
