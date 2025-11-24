@@ -1,0 +1,282 @@
+---
+title: "XGBoosting_SMOTE"
+output: html_document
+date: "2025-11-20"
+---
+
+The following code trains an XGBoosting model to predict injured cases in Denison University athletes using SMOTE resampling, stratified random sampling by injury, and optimizing Recall rather than F1. From there, it uses SHAP values to determine CMJ metrics with the most influence on injury prediction. It uses the "lasso_selected_43vars.csv" created from the Feature_Selection.Rmd. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(caret)
+library(smotefamily)
+library(xgboost)
+library(pROC)
+```
+
+
+# 1. Loading and Inspecting the Data
+
+```{r}
+# setting directory
+getwd()
+setwd("C:/Users/jordy/OneDrive/Documents/Coach_Scott/Injuries") # input personal project directory here
+
+data <- read.csv("lasso_selected_43vars.csv")
+str(data)
+```
+
+We use the same dataset before, so we have the same input variables for our model as our original XGBoost model. Now, we spit into training and test using stratified random sampling on the injured variable. We want to make sure that the training and test sets have the correct proportion (approximately 6%) of injured jumps. 
+
+# 2. Proportional Stratified Sampling 
+
+We will use proportional stratified sampling which allows us to select exactly 6% of injured players in each group. To do so, we will use the caret package and the createDataPartition function found in an online R tutorial written by Deepanshu Bhalla from listendata.com. 
+
+```{r}
+set.seed(123) # choosing 123 because it is easy to remember
+
+# creating the training index that finds the proportion of injured jumps and splits the sample percentage for the training set
+
+trainIndex <- createDataPartition(data$Injured, p = 0.8, list = FALSE, times = 1) # list = false stores the results as a matrix rather than a list and times is the number of partitions
+
+train <- data[trainIndex,]
+test <- data[-trainIndex,]
+
+# we will now check that the proportions were correct
+prop.table(table(data$Injured))
+prop.table(table(train$Injured))
+prop.table(table(test$Injured))
+```
+
+We now have approximately 5.3% injured events in both the training and testing sets. We will now move on to resampling our training set before our XGBoost model. 
+
+# 3. Synthetic Minority Over-sampling Technique 
+
+Because our data is highly imbalanced, we will generate synthetic positive instances in the training set using the SMOTE algorithm from the smotefamily package. We reference code from RPubs by RStudio to help produce the following code. 
+
+Before doing so, we need to check NA values because SMOTE will not run if there are NAs in the predictors (as found from trying to run SMOTE with NAs).
+
+```{r}
+# counting NA values per column in training set
+na_counts <- colSums(is.na(train))
+
+# checking NA percentages
+na_percent <- (na_counts / nrow(train)) * 100
+
+na_percent[na_percent > 0]  # only show columns with missing data
+```
+
+Similarly to what we found before using Elastic Net, we see there are 0.14% missing values in 8 different predictors. Because this is a small number of missing values, we will just remove these observations before resampling with SMOTE. 
+
+```{r}
+# removing those observations
+train <- train[complete.cases(train),]
+
+# checking missingness after
+# counting NA values per column in training set
+na_counts <- colSums(is.na(train))
+
+# checking NA percentages
+na_percent <- (na_counts / nrow(train)) * 100
+
+na_percent[na_percent > 0]  # only show columns with missing data
+```
+
+We can now move on the SMOTE resampling. 
+
+```{r}
+set.seed(123) # again for reproducibility
+
+which(colnames(train) == "Injured") # checking to see the column number of the injured variable to remove it during SMOTE
+
+train.smote <- SMOTE(train[, -1], train$Injured, K=5) # K=5 was chosen rather arbitrarily from example codes
+
+train.smote <- train.smote$data # extracting only the balanced dataset
+
+colnames(train.smote)[ncol(train.smote)] <- "Injured" # rename SMOTE's "class" column to "Injured"
+
+# we will now check the new proportions
+prop.table(table(train.smote$Injured))
+```
+
+Now, after running SMOTE, we have about 51% non-injured events and 49% injured events: a much more balanced dataset for training our model. We can now prepare this newly resampled training set for our XGBoost model. 
+
+# 4. Building DMatrix Objects (Required by XGBoost)
+
+For the remaing XGBoost matrix creation and cross validation of hyperparameters, we reference: https://carpentries-incubator.github.io/r-ml-tabular-data/06-Exploration/index.html. 
+
+This DMatrix is a specialized data structure designed to optimize memory usage and computation speed (https://medium.com/@heyamit10/xgboost-in-r-a-practical-guide-f14b722866c1). 
+
+```{r}
+dtrain <- xgb.DMatrix(data = as.matrix(select(train.smote, -Injured)), label = train.smote$Injured)
+
+dtest <- xgb.DMatrix(data = as.matrix(select(test, -Injured)), label = test$Injured)
+```
+
+# 5. Using Grid Search to tune hyperparameters
+
+We will now using a grid search cross-validation approach to find the best hyperparameters using the SMOTE balanced training set. Information was found at https://medium.com/@heyamit10/xgboost-in-r-a-practical-guide-f14b722866c1 and debugged using ChatGPT.  
+
+The grid search runs through all possible combination of candidate values for the following seelction of parameters (https://carpentries-incubator.github.io/r-ml-tabular-data/06-Exploration/index.html):
+
+```{r}
+# creating a column of four hyperparameters
+grid <- expand.grid(
+  eta = c(0.01, 0.1, 0.3), # learning rate
+  max_depth = c(4, 6, 8), # depth of each tree
+  subsample = c(0.7, 0.8, 0.9), # subsample ratio (based on random sample)
+  colsample_bytree = c(0.7, 0.8, 0.9) # fraction of features used per tree (based on random sample)
+)
+```
+
+
+```{r}
+set.seed(123) # again for reproducibility
+results <- list() # to store cross-validation results
+
+for(i in 1:nrow(grid)) {
+  params <- list(
+    eta = grid$eta[i],
+    max_depth = grid$max_depth[i],
+    subsample = grid$subsample[i],
+    colsample_bytree = grid$colsample_bytree[i],
+    objective = "binary:logistic",  # we are doing binary classification (injured or not)
+    eval_metric = "auc"  # our evaluation metric is auc         
+  )
+  
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain,
+    nrounds = 100,
+    nfold = 5,
+    early_stopping_rounds = 30, # kind of random but want to ensure the best results without exhausting the process
+    verbose = 0, # hides the outputs 
+    showsd = TRUE,
+    stratified = TRUE # preserves class proportions
+  )
+  
+  # store the best result for this parameter combination
+  results[[i]] <- list(
+    params = params,
+    best_nrounds = cv$best_iteration,
+    best_score = cv$evaluation_log$test_auc_mean[cv$best_iteration]
+  )
+}
+```
+
+```{r}
+# recording the best selected parameters using auc
+best_idx <- which.max(sapply(results, function(x) x$best_score))
+best_params <- results[[best_idx]]$params
+best_nrounds <- results[[best_idx]]$best_nrounds
+watch  <- list(train = dtrain, eval = dtest)
+```
+
+# 6. Evaluating model on the full training set
+
+We will now fit the final model using the optimal hyperparameters identified from the cross-validation search. We'll train on the entire training set. Code was developed from xgb.train Rdocumentation as well as Kaggle to understand the "watchlist" parameter. 
+
+```{r}
+# train the final model on full training set 
+final_model <- xgb.train(
+  params  = best_params,
+  data    = dtrain,
+  nrounds = best_nrounds,
+  watchlist = watch,         
+  verbose = 0) # hiding the long output with verbose = 0
+```
+
+# 7. Evaluating the Final XGBoost Model on Test Data
+
+We will begin by getting the trained model to estimate probabilities that each test jump is an injured event (Injured = 1). 
+
+```{r}
+# testing predicted probabilities for Injured
+test_pred_prob <- predict(final_model, dtest)
+head(test_pred_prob)
+```
+
+We will now plot the ROC curve using the pROC package. 
+
+```{r}
+labels_test <- getinfo(dtest, "label") # pulling the injured "0" and "1" labels from the test set
+
+roc_obj <- roc(
+  response = labels_test,      
+  predictor = test_pred_prob    
+)
+
+plot(
+  roc_obj,
+  main = "ROC Curve - XGBoost Model"
+)
+auc_value <- auc(roc_obj)
+legend("bottomright", legend = paste("AUC =", round(auc_value, 3)), bty = "n") # used ChatGPT to add to the graph
+
+
+```
+
+The above ROC curve shows the performance of the XGBoost model on the test set. The X-axis shows specificity, or the false positive rate. Lower values are better, meaning less of the non-injured jumps are incorrectly classified as "injured". The Y-axis shows the true positive rate, meaning the porportion of actual injuries correctly identified. Higher values mean the model catches more true injures. With an AUC of 0.764, we can say in approximately 76% of randomly paired injured vs. non-injured jumps, the injured jump is scored higher. 
+
+We will now convert probabilities to class predictions with a threshold of 0.5 (above 0.5 is Injured and below is Not Injured). We will rerun this later by optimizing recall. 
+
+```{r}
+# converting probabilities to 0/1 class predictions using 0.5 cutoff
+test_pred_class <- ifelse(test_pred_prob >= 0.5, 1, 0)
+```
+
+Next, we'll compute the confusion matrix with accuracy, precision, recall and F1. 
+
+```{r}
+# we didn't create a y_test variable earlier, so we will extract the true labels from dtest
+y_test <- getinfo(dtest, "label")
+
+# confusion matrix components
+tn <- sum(test_pred_class == 0 & y_test == 0)
+tp <- sum(test_pred_class == 1 & y_test == 1)
+fn <- sum(test_pred_class == 0 & y_test == 1)
+fp <- sum(test_pred_class == 1 & y_test == 0)
+
+# metrics
+accuracy  <- (tp + tn) / (tp + tn + fp + fn)
+precision <- tp / (tp + fp)
+recall    <- tp / (tp + fn)   # aka sensitivity
+f1_score  <- 2 * (precision * recall) / (precision + recall)
+
+# print in clean format
+metrics <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall (Sensitivity)", "F1 Score"),
+  Value  = round(c(accuracy, precision, recall, f1_score), 3)
+)
+metrics
+```
+
+We will now find the best cutoff by maximizing recall which shows how well the model predicts true positives. This is most important in injury prediction. 
+
+```{r}
+thresholds <- seq(0, 1, by = 0.01)
+precision_vals <- numeric(length(thresholds))
+recall_vals <- numeric(length(thresholds))
+
+for (i in seq_along(thresholds)) {
+  pred <- ifelse(test_pred_prob >= thresholds[i], 1, 0)
+  tp <- sum(pred == 1 & y_test == 1)
+  fp <- sum(pred == 1 & y_test == 0)
+  fn <- sum(pred == 0 & y_test == 1)
+  
+  precision_vals[i] <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall_vals[i] <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+}
+
+# Plot recall vs threshold
+plot(thresholds, recall_vals, type="l", col="blue", lwd=2, ylim=c(0,1),
+     xlab="Threshold", ylab="Metric", main="Recall vs Threshold")
+lines(thresholds, precision_vals, col="red", lwd=2)
+legend("topright", legend=c("Recall", "Precision"), col=c("blue", "red"), lwd=2)
+
+```
+
+
+

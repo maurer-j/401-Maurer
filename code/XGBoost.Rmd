@@ -1,0 +1,555 @@
+---
+title: "Prediction with XGBoost"
+output: html_document
+author: "Jordyn Maurer"
+date: "2025-10-29"
+---
+
+The following code trains an XGBoosting model to predict injured cases in Denison University athletes. From there, it uses SHAP values to determine CMJ metrics with the most influence on injury prediction. It uses the "lasso_selected_43vars.csv" created from the Feature_Selection.Rmd. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(42) # ensures reproducibility across all chunks
+library(readr)
+library(dplyr)
+library(caret)
+library(tibble)
+library(xgboost)
+library(pROC)
+library(PRROC)
+library(ggplot2)
+library(Matrix)
+library(stringr)
+library(knitr)
+library(kableExtra)
+library(webshot2)
+library(shapviz)
+```
+
+
+# 1. Loading and Inspecting the Data
+
+```{r}
+# setting directory
+getwd()
+setwd("C:/Users/jordy/OneDrive/Documents/Coach_Scott/Injuries") # input personal project directory here
+dat <- read.csv("lasso_selected_43vars.csv")
+str(dat)
+```
+
+Now, we spit into training and test using stratified random sampling on the injured variable. We want to make sure that the training and test sets have the correct proportion (approximately 6%) of injured jumps. 
+
+# 2. Proportional Stratified Sampling 
+
+```{r}
+train_idx <- caret::createDataPartition(dat$Injured, p = 0.80, list = FALSE)
+train <- dat[train_idx, ]
+test  <- dat[-train_idx, ]
+
+# Matrix form for XGBoost (guarantee numeric)
+x_train <- train |> dplyr::select(-Injured) |> data.matrix()
+y_train <- train$Injured
+
+x_test  <- test  |> dplyr::select(-Injured) |> data.matrix()
+y_test  <- test$Injured
+```
+
+We split the data into a training (80%) and testing (20%) set using stratified random sampling (preserving the proportion of injured and non-injured cases). To do so, we will use the caret package and the createDataPartition function found in an online R tutorial written by Deepanshu Bhalla from listendata.com.
+
+# 3. Handling Class Imbalance Using scale_pos_weight
+
+As described before, we are dealing with approximately 6% of the jumps classified as "Injured," making it highly imbalanced. We will now compute the imbalance ratio and set up the XGBoost DMatrix objects. 
+
+```{r}
+# counting number of injured (1) and non-injured (0) jumps in the training data
+pos <- sum(y_train == 1)
+neg <- sum(y_train == 0)
+
+# calculating the ratio for XGBoost's weighting
+scale_pos_weight <- neg / pos
+
+# printing out the imbalance info
+cat("Injured (positive):", pos, "\nNon-injured (negative):", neg,
+    "\nscale_pos_weight =", round(scale_pos_weight, 2), "\n")
+```
+
+In the training data, only 1,103 out of all training jumps are injury events. So, each injured jump will be treated as roughly 18 times more important than non-injured jumps during model training. This balances the gradient so the model pays attention to both classes equally. The following table was debugged and helped generate with ChatGPT. 
+
+```{r}
+# putting this output in a clean table format for report
+imbalance_tbl <- tibble(
+  `Class / Parameter` = c("Non-Injured (0)", "Injured (1)", "scale_pos_weight"),
+  Count_raw = c(neg, pos, scale_pos_weight)
+) %>%
+  mutate(
+    Count = ifelse(`Class / Parameter` == "scale_pos_weight",
+                   format(round(Count_raw, 2), trim = TRUE),
+                   comma(Count_raw, accuracy = 1))
+  ) %>%
+  select(`Class / Parameter`, Count)
+
+# creating the LaTeX code as text 
+latex_table <- knitr::kable(
+  imbalance_tbl,
+  format = "latex",
+  booktabs = TRUE,
+  align = c("l","r"),
+  caption = "Table 1. Class Imbalance Summary — Training Set Only",
+  label = "tab:imbalance"
+)
+
+# view the LaTeX code in console to paste into Overleaf
+cat(latex_table)
+```
+
+# 4. Building DMatrix Objects (Required by XGBoost)
+
+For the remaing XGBoost matrix creation and cross validation of hyperparameters, we reference: https://carpentries-incubator.github.io/r-ml-tabular-data/06-Exploration/index.html. 
+
+This DMatrix is a specialized data structure designed to optimize memory usage and computation speed (https://medium.com/@heyamit10/xgboost-in-r-a-practical-guide-f14b722866c1). 
+
+```{r}
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+dtest  <- xgb.DMatrix(data = x_test,  label = y_test)
+watch  <- list(train = dtrain, eval = dtest)
+```
+
+# 5. Cross-Validation and Parameter Tuning
+
+We will now using a grid search cross-validation approach to find the best hyperparameters using the scaled training set. Information was found at https://medium.com/@heyamit10/xgboost-in-r-a-practical-guide-f14b722866c1 and debugged using ChatGPT.  
+
+The grid search runs through all possible combination of candidate values for the following seelction of parameters (https://carpentries-incubator.github.io/r-ml-tabular-data/06-Exploration/index.html):
+
+```{r}
+# each row is one candidate configuration to try in CV
+param_grid <- expand.grid(
+  eta = c(0.05, 0.10),        # learning rate: smaller = slower but safer training
+  max_depth = c(3, 5, 7),     # tree depth: higher can fit more complex interactions
+  min_child_weight = c(1, 5), # min sum of instance weight in a child: higher = more conservative splits
+  subsample = c(0.7, 0.9),    # row subsampling per tree: <1 adds randomness & reduces overfitting
+  colsample_bytree = c(0.7, 0.9) # column subsampling per tree: same idea, for features
+)
+
+nrow(param_grid) # checking dimensions to see if it worked
+
+# object to store the best result we see across the grid
+best <- list(auc = -Inf, params = NULL, nrounds = NULL, i = NA)
+```
+
+We will now loop through the grid. For each configuration we run 5-fold cross-validation on the training set, optimize AUC, and use early stopping to pick the best number of trees (nrounds). We will keep the best model seen so far. ChatGPT was used to adapt the following loop into a more advanced process that prints out the parameters at each fold so that we could better understanding what was occurring during each round. 
+
+```{r}
+set.seed(42)
+K <- 5
+folds <- createFolds(y = y_train, k = K, list = TRUE, returnTrain = FALSE)
+
+# grid search with the use of ChatGPT to help print messages during each run through
+cv_summaries <- vector("list", nrow(param_grid))
+best <- list(auc = -Inf, params = NULL, nrounds = NA_integer_, i = NA_integer_)
+
+for (i in seq_len(nrow(param_grid))) {
+  p <- param_grid[i, ]
+
+  params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = p$eta,
+    max_depth        = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample        = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    lambda           = 1,
+    alpha            = 0,
+    scale_pos_weight = scale_pos_weight,
+    tree_method      = "hist"
+  )
+
+  message(sprintf(
+    "CV %02d/%02d | eta=%.2f, depth=%d, mcw=%d, subs=%.2f, cols=%.2f",
+    i, nrow(param_grid), p$eta, p$max_depth, p$min_child_weight, p$subsample, p$colsample_bytree
+  ))
+
+  cv <- tryCatch(
+    xgb.cv(
+      params   = params,
+      data     = dtrain,
+      nrounds  = 2000,                 # high cap but we use early stopping to find the best
+      folds    = folds,                
+      early_stopping_rounds = 50, # kind of randome but wanted to be large enough to capture everything without being too exhaustive
+      stratified = TRUE,
+      verbose  = 0, # does not print every little thing
+      seed     = 42                    # extra  to ensure reproducibility
+    ),
+    error = function(e) {
+      warning(sprintf("Skipping combo %d due to error: %s", i, e$message))
+      NULL
+    }
+  )
+  if (is.null(cv)) next
+
+  auc_vec   <- cv$evaluation_log$test_auc_mean
+  mean_auc  <- max(auc_vec, na.rm = TRUE)
+  best_iter <- if (is.null(cv$best_iteration) || is.na(cv$best_iteration))
+                 which.max(auc_vec) else cv$best_iteration
+
+  cv_summaries[[i]] <- data.frame(
+    i = i,
+    eta = p$eta,
+    max_depth = p$max_depth,
+    min_child_weight = p$min_child_weight,
+    subsample = p$subsample,
+    colsample_bytree = p$colsample_bytree,
+    best_auc = mean_auc,
+    best_nrounds = best_iter
+  )
+
+  if (mean_auc > best$auc) {
+    best <- list(auc = mean_auc, params = params, nrounds = best_iter, i = i)
+  }
+
+  message(sprintf("  -> combo AUC: %.4f at %d rounds", mean_auc, best_iter))
+}
+```
+
+
+# 6. Train Final XGBoost Model Using Best Parameters
+
+We will now fit the final model using the optimal hyperparameters identified from the cross-validation search. We'll train on the entire training set, using best$nrounds for the number of boosting iterations, and then evaluate performance on the test set. 
+
+Code was developed from xgb.train Rdocumentation as well as Kaggle to understand the "watchlist" parameter. 
+
+```{r}
+# build cv_results 
+cv_results <- bind_rows(cv_summaries[!sapply(cv_summaries, is.null)])
+
+# making sure it runs
+stopifnot(is.data.frame(cv_results), nrow(cv_results) > 0)
+
+# finding the row that maximizes AUC
+best_row <- cv_results[which.max(cv_results$best_auc), ]
+
+# build parameter list from the best row and the fixed constants like lambda and alpha
+best_params <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "auc",
+  eta              = best_row$eta,
+  max_depth        = best_row$max_depth,
+  min_child_weight = best_row$min_child_weight,
+  subsample        = best_row$subsample,
+  colsample_bytree = best_row$colsample_bytree,
+  lambda           = 1,
+  alpha            = 0,
+  scale_pos_weight = scale_pos_weight,
+  tree_method      = "hist"
+)
+
+# best object 
+best <- list(
+  auc     = best_row$best_auc,
+  params  = best_params,
+  nrounds = best_row$best_nrounds,
+  i       = best_row$i
+)
+```
+
+
+```{r}
+# extracting best parameters and number of trees
+final_params  <- best$params
+final_nrounds <- best$nrounds
+
+cat("Best Parameters:\n")
+print(final_params)
+cat("\nOptimal Number of Boosting Rounds:", final_nrounds, "\n")
+```
+
+The above output shows us that the cross-validation process decided 700 trees was the optimal stopping point, where after that test AUC stopped improving. This is to be expected given our small learning rate of 0.05. 
+
+```{r}
+# train the final model on full training set 
+final_model <- xgb.train(
+  params  = final_params,
+  data    = dtrain,
+  nrounds = final_nrounds,
+  watchlist = watch,         
+  verbose = 0 # hiding the long output because there will be 700 prints
+)
+```
+
+The above evaluates the model on the entire training set. 
+
+# 7. Evaluating the Final XGBoost Model on Test Data
+
+We will begin by getting the trained model to estimate probabilities that each test jump is an injured event (Injured = 1). 
+
+```{r}
+# testing predicted probabilities for the positive class (Injured)
+test_pred_prob <- predict(final_model, dtest)
+head(test_pred_prob)
+```
+
+We will now build the ROC curve and compute AUC score using the pROC package. 
+
+```{r}
+# compute ROC
+roc_obj <- roc(response = y_test, predictor = test_pred_prob)
+
+# AUC
+auc_value <- auc(roc_obj)
+
+# ROC curve plot --> used ChatGPT to help polish graph
+png("roc_XGBoost.png", width = 800, height = 600, res = 150)
+plot(
+  roc_obj,
+  main = "Figure 6. ROC Curve for XGBoost: Test Set",
+  print.auc = TRUE,
+  legacy.axes = TRUE
+)
+```
+
+The above ROC curve shows the performance of the XGBoost model on the test set. The X-axis shows specificity, or the false positive rate. Lower values are better, meaning less of the non-injured jumps are incorrectly classified as "injured". The Y-axis shows the true positive rate, meaning the porportion of actual injuries correctly identified. Higher values mean the model catches more true injures. Because our curve stays well above the diagonal "random guessing" line with an AUC of 0.836, we can say in approximately 84% of randomly paired injured vs. non-injured jumps, the injured jump is scored higher. This is strong predictive performance, especially given the imbalanced injury data. 
+
+We will now convert probabilities to class labels with a threshold of 0.5. We will rerun this later using a data-driven threshold like the F1 optimal value. 
+
+```{r}
+# converting probabilities to 0/1 class predictions using 0.5 cutoff
+
+test_pred_class <- ifelse(test_pred_prob >= 0.5, 1, 0)
+```
+
+Next, we'll compute the confusion matrix with accuracy, precision, recall and F1. 
+
+```{r}
+# confusion matrix components
+tn <- sum(test_pred_class == 0 & y_test == 0)
+tp <- sum(test_pred_class == 1 & y_test == 1)
+fn <- sum(test_pred_class == 0 & y_test == 1)
+fp <- sum(test_pred_class == 1 & y_test == 0)
+
+# metrics
+accuracy  <- (tp + tn) / (tp + tn + fp + fn)
+precision <- tp / (tp + fp)
+recall    <- tp / (tp + fn)   # a.k.a sensitivity or true positive rate
+f1_score  <- 2 * (precision * recall) / (precision + recall)
+
+# print in clean format
+metrics <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall (Sensitivity)", "F1 Score"),
+  Value  = round(c(accuracy, precision, recall, f1_score), 3)
+)
+metrics
+
+```
+
+From the above, we see that when a model predicts an injury, it is right only about 36% of the time. Further, the model only catches about 24% of actual injuries. Finally, our F1 score is low indicating an imbalance. Our model predicts "not injured" for everything which explains our high accuracy value. We will now find the best cutoff by maximizing F1 score. 
+
+```{r}
+# create all possible thresholds from 0 to 1
+thresholds <- seq(0, 1, by = 0.01)
+
+# for each threshold, calculate precision, recall, F1 --> debugged with ChatGPT
+f1_scores <- sapply(thresholds, function(t) {
+  pred <- ifelse(test_pred_prob >= t, 1, 0)
+  
+  tp <- sum(pred == 1 & y_test == 1)
+  fp <- sum(pred == 1 & y_test == 0)
+  fn <- sum(pred == 0 & y_test == 1)
+  
+  precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+  recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+  
+  if (precision + recall == 0) return(0)
+  return(2 * precision * recall / (precision + recall))  # F1 score
+})
+
+# get best cutoff
+best_idx <- which.max(f1_scores)
+best_threshold <- thresholds[best_idx]
+best_f1 <- f1_scores[best_idx]
+
+cat("Optimal threshold =", best_threshold, "with F1 Score =", round(best_f1, 3), "\n")
+```
+
+We will now evaluate the model using this new cutoff rather than 0.5. 
+
+```{r}
+# apply best threshold
+test_pred_best <- ifelse(test_pred_prob >= best_threshold, 1, 0)
+
+# recompute confusion matrix metrics
+tp <- sum(test_pred_best == 1 & y_test == 1)
+tn <- sum(test_pred_best == 0 & y_test == 0)
+fp <- sum(test_pred_best == 1 & y_test == 0)
+fn <- sum(test_pred_best == 0 & y_test == 1)
+
+# metrics
+accuracy_best  <- (tp + tn) / (tp + tn + fp + fn)
+precision_best <- tp / (tp + fp)
+recall_best    <- tp / (tp + fn)
+f1_best        <- 2 * (precision_best * recall_best) / (precision_best + recall_best)
+
+# create results table --> helped translate into Table and LaTex Code with ChatGPT
+results_table <- data.frame(
+  Threshold = round(best_threshold, 3),
+  Accuracy  = round(accuracy_best, 3),
+  Precision = round(precision_best, 3),
+  Recall    = round(recall_best, 3),
+  F1        = round(f1_best, 3)
+)
+
+# Print as LaTeX table
+results_latex <- knitr::kable(
+  results_table,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Classification Metrics at Optimal Threshold"
+)
+
+# view the LaTeX code for easy copying into Overleaf
+cat(results_latex)
+```
+
+With a new F1 score of 0.357, we have a better balance between precision and recall. We are effectively making the model more sensitive to catch more injuries at the cost of flagging a few more false positives. With this new threshold of 0.2, our precision decreased but our recall increased substantially and our F1 score improved. This is exactly the case we want in order to catch more injuries. 
+
+We will now create a confusion matrix table using this optimal cutoff point. 
+
+```{r}
+# predictions using this optimal threshold
+test_pred_best <- ifelse(test_pred_prob >= best_threshold, 1, 0)
+
+# compute components of confusion matrix
+tn <- sum(test_pred_best == 0 & y_test == 0)
+fp <- sum(test_pred_best == 1 & y_test == 0)
+fn <- sum(test_pred_best == 0 & y_test == 1)
+tp <- sum(test_pred_best == 1 & y_test == 1)
+
+# build the confusion matrix table
+confusion_table <- data.frame(
+  `Actual Class` = c("Non-Injured (0)", "Injured (1)"),
+  `Predicted 0`  = c(tn, fn),
+  `Predicted 1`  = c(fp, tp),
+  check.names = FALSE
+)
+
+# add thousands separators (created with ChatGPT)
+confusion_table[ , 2:3] <- lapply(confusion_table[ , 2:3],
+                                  function(x) format(x, big.mark = ","))
+
+# create LaTeX table
+latex_cm <- kbl(
+  confusion_table,
+  format  = "latex",
+  booktabs = TRUE,
+  align   = c("l","r","r"),
+  caption = sprintf("Table X: Confusion Matrix at Optimal Threshold (%.2f)", best_threshold)
+) |>
+  add_header_above(c(" " = 1, "Predicted" = 2)) |>
+  kable_styling(position = "center", latex_options = "hold_position")
+
+# print LaTeX code to console 
+cat(latex_cm)
+```
+
+From the confusion matrix, we see the model correctly identifies the vast majority of non-injured jumps as "not injured". This is expected since the dataset is highly imbalanced. In the case of injury prevention, we aren't necessarily as concerned with the false positives (302). The false negatives (155) are the missed injury cases. These are the most concerning, because missing an athlete at risk could lead to real injury. With this threshold, the true positives were 127, meaning the model catches 45% of all injuries (recall). 
+
+At the optimal threshold of 0.2 (chosen to maximize the F1-score), the model correctly classified 127 out of 282 true injury cases (Sensitivity = 45%). Sensitivity significantly improved, meaning the model identifies more athletes at risk of injury which is more important in this context than overall accuracy.
+
+Because of the imbalance in our dataset, we will now create the Precision-Recall Curve which gives us more information than the ROC curve. 
+
+```{r}
+# compute precision-recall curve data
+pr_obj <- pr.curve(
+  scores.class0 = test_pred_prob[y_test == 1],  # predicted probabilities for actual injuries
+  scores.class1 = test_pred_prob[y_test == 0],
+  curve = TRUE
+)
+
+# plot Precision-Recall curve
+png("prerecall_XGBoost.png", width = 800, height = 600, res = 150)
+plot(
+  pr_obj,
+  main = "Figure 7. Precision–Recall Curve for XGBoost",
+  auc.main = FALSE,
+  lwd = 2,
+  col = "black"
+)
+
+# print AUPRC (area under precision-recall curve)
+cat("AUPRC =", round(pr_obj$auc.integral, 3), "\n")
+```
+
+The Precision–Recall curve above demonstrates how the model’s ability to correctly identify injured jumps (recall) trades off with its correctness when it predicts an injury (precision). Because injuries make up only 6% of the data, the PR curve is a more informative diagnostic than the ROC curve. Our model achieves a maximum F1 score at threshold 0.2, where precision = 0.296 and recall = 0.45. This means the model correctly identifies ~45% of injuries while being correct about ~29.6% of its injury predictions. Performance degrades as recall increases beyond ~0.4, showing that the model cannot catch all injuries without incurring many false alarms.
+
+
+# 8. SHAP Value Computation and Interpretation
+
+We will begin by computing SHAP values on the test set to help explain why the model makes each prediction and which CMJ variables contribute most to injury risk predictions. 
+
+```{r}
+# SHAP contributions for each test row and feature (+ a BIAS/base value column)
+shap_test <- predict(final_model, dtest, predcontrib = TRUE)
+
+# put into a data frame and attach feature names
+shap_test <- as.data.frame(shap_test)
+colnames(shap_test) <- c(colnames(x_test), "BIAS")
+
+# drop the baseline (intercept) column for importance summaries
+shap_only <- shap_test[, setdiff(names(shap_test), "BIAS")]
+
+```
+
+We will now rank features by how influential they are overall, ignoring positive or negative influence on injury risk by taking the mean absolute SHAP. 
+
+```{r}
+shap_importance <- shap_only |>
+  summarize(across(everything(), ~ mean(abs(.), na.rm = TRUE))) |>
+  tidyr::pivot_longer(everything(),
+                      names_to = "Feature",
+                      values_to = "MeanAbsSHAP") |>
+  arrange(desc(MeanAbsSHAP))
+
+head(shap_importance, 10)
+```
+
+The variables shown above cause the largest changes in predicted injury risk. Not necessarily higher/lower but influence either way. 
+
+```{r}
+topN <- 10
+
+# keep top N and needed columns
+imp_tbl <- shap_importance %>%
+  slice_head(n = topN) %>%
+  select(Feature, MeanAbsSHAP) %>%
+  mutate(Feature = gsub("_", " ", Feature))  # nicer labels
+
+# horizontal bar plot
+p_shap <- ggplot(imp_tbl,
+                 aes(x = reorder(Feature, MeanAbsSHAP), y = MeanAbsSHAP)) +
+  geom_col(fill = "#D02130", width = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Figure 8. Top 10 Features by Mean |SHAP|",
+    subtitle = "Test set, XGBoost (log-odds scale)",
+    x = NULL,
+    y = "Mean |SHAP| (log-odds)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    axis.title = element_text(face = "bold", size = 9),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  )
+
+# display
+p_shap
+
+# save 
+ggsave("shap_top10.png", p_shap, width = 6.5, height = 4.2, dpi = 300)
+
+```
+
+This graph displays the top 10 CMJ metrics with the most influence on injury prediction as described in our XGBoost model. 6 of which come from the propulsive phase of the jump with the most coming specifically from average propulsive velocity. 
+
+
