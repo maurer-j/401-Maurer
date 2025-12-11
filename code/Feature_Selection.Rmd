@@ -32,7 +32,7 @@ library(gt)
 
 # 1. Loading and Inspecting Data
 ```{r}
-# setting directory (probably needs to be changed later)
+# setting directory 
 getwd()
 setwd("C:\\Users\\jordy\\OneDrive\\Documents\\Coach_Scott\\Injuries") # input personal project directory here
 data <- read.csv("final_data.csv")
@@ -48,7 +48,7 @@ summary(data$Injured)
 data$Injured <- as.numeric(data$Injured)
 ```
 
-Now, we need to remove identifiers and non-numeric colummns. These identifiers include IDs, organizations, dates, and injury types. We will remove all character variables as well as "days_before" which was a helper variable to identify injured vs. non-injured jumps.  
+Now, we need to remove identifiers and non-numeric columns. These identifiers include organizations, dates, and injury types. We will remove all character variables as well as "days_before" which was a helper variable to identify injured vs. non-injured jumps.  
 
 ```{r}
 # removing identifiable information that will not be involved in the study and keeping only numeric data.  
@@ -108,7 +108,7 @@ The above visual demonstrates that many CMJ metrics are strongly interrelated, w
 We will now use Elastic Net that blends lasso ($\alpha = 1$) and ridge ($\alpha = 0$) methods, accounting for multicollinearity and variable selection. 
 
 ```{r}
-# performing an 80/20 split by athlete ID for train and test 
+# performing an 80/20 split by athlete ID for train and test so that each athlete appears only once (avoiding info leak) (Sanderson, 2024)
 ids <- unique(data$ID)
 train_ids <- sample(ids, size = floor(0.80 * length(ids)))
 is_train <- data$ID %in% train_ids
@@ -135,7 +135,7 @@ na_percent[na_percent > 0]  # only show columns with missing data
 From the above output, we see there are 12 columns with 0.16% missing values. To account for these, we will insert the median of the column wherever the missing value occurs. 
 
 ```{r}
-# median imputation
+# median imputation (helped to debug with ChatGPT)
 
 # identifying numeric columns (excluding Injured)
 num_cols <- setdiff(names(train_df), "Injured")
@@ -149,7 +149,7 @@ for (nm in num_cols) {
   # Impute in training data
   train_df[[nm]][is.na(train_df[[nm]])] <- meds[[nm]]
   
-  # Impute in test data (using training medians!)
+  # impute in test data (using training medians)
   if (nm %in% names(test_df)) {
     test_df[[nm]][is.na(test_df[[nm]])] <- meds[[nm]]
   }
@@ -179,8 +179,8 @@ We'll begin by visualizing the proportion of Injured vs. Non-Injured jumps.
 ```{r}
 # counts & proportions
 injury_counts <- data_numeric %>%
-  dplyr::count(Injured) %>%
-  dplyr::mutate(
+  count(Injured) %>%
+  mutate(
     Class = factor(ifelse(Injured == 1, "Injured", "Non-Injured"),
                    levels = c("Non-Injured", "Injured")),
     Proportion = n / sum(n),
@@ -194,7 +194,7 @@ fig1 <- ggplot(injury_counts, aes(x = Class, y = Proportion, fill = Class)) +
   geom_col(width = 0.6) +
   scale_fill_manual(values = c("Non-Injured" = "#D02130", "Injured" = "gray80")) +
   scale_y_continuous(
-    labels = scales::percent_format(accuracy = 1),
+    labels = percent_format(accuracy = 1),
     limits = c(0, 1),
     expand = expansion(mult = c(0, 0.08))
   ) +
@@ -239,12 +239,12 @@ summary(wts_train) # confirms weight distribution
 ```
 
 ```{r}
-# lock folds so results don't change
+# lock folds so results don't change (helped debug from ChatGPT to ensure reproducibility)
 K <- 10
 set.seed(42)  
 foldid <- sample(rep(1:K, length.out = length(y_train)))
 
-# alpha sweep (no caching)
+# alpha sweep 
 alphas_w <- seq(0, 1, by = 0.1)
 cv_results_w <- data.frame(alpha = alphas_w, mean_AUC = NA_real_)
 
@@ -267,10 +267,10 @@ best_alpha_w
 cv_results_w
 ```
 
-After weighting the training set, we received a different alpha of 0.2, but it still leans towards Ridge rather than Lasso, so we'll have limited feature selection.  
+After weighting the training set, we received alpha of 0.2, but it still leans towards Ridge rather than Lasso, so we'll have limited feature selection.  
 
 ```{r}
-# Plot mean AUC across alpha values (Weighted Elastic Net)
+# plot mean AUC across alpha values (Weighted Elastic Net)
 best_idx_w <- which.max(cv_results_w$mean_AUC)
 best_alpha_w <- cv_results_w$alpha[best_idx_w]
 best_auc_w <- cv_results_w$mean_AUC[best_idx_w]
@@ -314,10 +314,8 @@ cv_elnet_w <- cv.glmnet(
 )
 
 # plot the cross-validation results
-png("elasticnet_plot_weighted.png", width = 800, height = 600, res = 150)
-
 plot(cv_elnet_w)
-title(main = paste("Figure 3. Elastic Net CV (Weighted, α =", best_alpha_w, ")"), line = 2.5)
+
 ```
 
 
@@ -339,7 +337,7 @@ Because our alpha value stayed closely to 0, this was practically Ridge. So, whi
 # cross-validated Lasso with class weights
 set.seed(42)
 K <- 10
-foldid <- sample(rep(1:K, length.out = length(y_train)))
+foldid <- sample(rep(1:K, length.out = length(y_train))) # ensures that the same observations go into the same fold each time so we don't do random splits each time
 
 cv_lasso_w <- cv.glmnet(
   x = x_train, y = y_train,
@@ -367,21 +365,21 @@ lambda_min_w; lambda_1se_w
 Lambda min of 0.00022 yielded the highest AUC during training, and lambda 1se = 0.00047 represents a simpler model within one standard error of the minimum. The cross-validation curve shows that the model performance steadily increase as lambda decreased, peaking near 0.64. The gap between lambda min and lambda 1se is small, indicating that the simpler lambda 1se model sacrifices minimal predictive performance while retaining fewer predictors. 
 
 ```{r}
-# Coefficients & selected features at λ_min and λ_1se (weighted)
+# coefficients and selected features at λ_min and λ_1se 
 coef_min_w <- coef(cv_lasso_w, s = "lambda.min")
 coef_1se_w <- coef(cv_lasso_w, s = "lambda.1se")
 
 nonzero_min_w <- rownames(coef_min_w)[coef_min_w[, 1] != 0]
 nonzero_1se_w <- rownames(coef_1se_w)[coef_1se_w[, 1] != 0]
 
-nonzero_1se_w     # inspect
+nonzero_1se_w     # checking
 length(nonzero_1se_w); length(nonzero_min_w)
 ```
 
 From the above output, we see our lambda 1se model yielded 43 nonzero predictors, a meaningful reduction from the 77 predictors retained by Elastic Net. 
 
 ```{r}
-# test-set performance: λ_min vs λ_1se (weighted)
+# test-set performance: λ_min vs λ_1se
 p_min_w <- as.numeric(predict(cv_lasso_w, newx = x_test, s = "lambda.min", type = "response"))
 p_1se_w <- as.numeric(predict(cv_lasso_w, newx = x_test, s = "lambda.1se", type = "response"))
 
@@ -392,7 +390,7 @@ auc_min_w <- as.numeric(auc(roc_min_w))
 auc_1se_w <- as.numeric(auc(roc_1se_w))
 auc_min_w; auc_1se_w
 
-# Plot both weighted ROC curves
+# plot both weighted ROC curves
 png("weighted_lasso_roc.png", width = 800, height = 600, res = 150)
 plot(roc_min_w, col = "#D02130", lwd = 2,
      main = paste0("Figure 5. Test ROC — Weighted Lasso: λ_min vs λ_1se\n",
@@ -424,7 +422,7 @@ if (length(nzv_idx) > 0) {
   X <- X[, -nzv_idx, drop = FALSE]
 }
 
-# remove perfect linear combinations (exact multicollinearity since we had this error before)
+# remove perfect linear combinations (exact multicollinearity since we had this error before) (helped debug with ChatGPT)
 combos <- findLinearCombos(X)  # finds columns participating in linear combos
 if (!is.null(combos$remove) && length(combos$remove) > 0) {
   X <- X[, -combos$remove, drop = FALSE]
@@ -435,7 +433,7 @@ dat_vif <- cbind(Injured = as.numeric(train_df$Injured), X)
 fit_vif <- lm(Injured ~ ., data = dat_vif)
 
 # compute VIFs
-vifs <- car::vif(fit_vif)            
+vifs <- vif(fit_vif)            
 vifs_sorted <- sort(vifs, decreasing = TRUE)
 
 # peek and summarize
@@ -456,7 +454,7 @@ lasso_vars_final <- setdiff(nonzero_1se_w, "(Intercept)")
 
 # subset from the full original data_numeric to keep 'Injured' and lasso variables
 xgb_data <- data_numeric %>%
-dplyr::select(Injured, all_of(lasso_vars_final))
+select(Injured, all_of(lasso_vars_final))
 
 # confirm dimensions and structure
 dim(xgb_data)

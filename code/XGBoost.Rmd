@@ -118,7 +118,7 @@ watch  <- list(train = dtrain, eval = dtest)
 
 We will now using a grid search cross-validation approach to find the best hyperparameters using the scaled training set. Information was found at https://medium.com/@heyamit10/xgboost-in-r-a-practical-guide-f14b722866c1 and debugged using ChatGPT.  
 
-The grid search runs through all possible combination of candidate values for the following seelction of parameters (https://carpentries-incubator.github.io/r-ml-tabular-data/06-Exploration/index.html):
+The grid search runs through all possible combination of candidate values for the following selection of parameters (https://carpentries-incubator.github.io/r-ml-tabular-data/06-Exploration/index.html):
 
 ```{r}
 # each row is one candidate configuration to try in CV
@@ -397,8 +397,8 @@ results_table <- data.frame(
   F1        = round(f1_best, 3)
 )
 
-# Print as LaTeX table
-results_latex <- knitr::kable(
+#print as LaTeX table
+results_latex <- kable(
   results_table,
   format = "latex",
   booktabs = TRUE,
@@ -498,12 +498,12 @@ shap_only <- shap_test[, setdiff(names(shap_test), "BIAS")]
 
 ```
 
-We will now rank features by how influential they are overall, ignoring positive or negative influence on injury risk by taking the mean absolute SHAP. 
+We will now rank features by how influential they are overall, ignoring positive or negative influence on injury risk by taking the mean absolute SHAP (helped to debug with ChatGPT). 
 
 ```{r}
 shap_importance <- shap_only |>
   summarize(across(everything(), ~ mean(abs(.), na.rm = TRUE))) |>
-  tidyr::pivot_longer(everything(),
+  pivot_longer(everything(),
                       names_to = "Feature",
                       values_to = "MeanAbsSHAP") |>
   arrange(desc(MeanAbsSHAP))
@@ -520,7 +520,7 @@ topN <- 10
 imp_tbl <- shap_importance %>%
   slice_head(n = topN) %>%
   select(Feature, MeanAbsSHAP) %>%
-  mutate(Feature = gsub("_", " ", Feature))  # nicer labels
+  mutate(Feature = gsub("_", " ", Feature))  #
 
 # horizontal bar plot
 p_shap <- ggplot(imp_tbl,
